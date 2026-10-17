@@ -1,0 +1,4 @@
+- insert:
+    - id: local-codex-dots
+      name: '@local/dsh-codex-dots'
+      config: {}

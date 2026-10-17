@@ -1,0 +1,24 @@
+{
+  "name": "@local/dsh-codex-dots",
+  "version": "2.3.1",
+  "private": true,
+  "type": "module",
+  "description": "DeepSeek 主导的 Codex / DSH 后台任务编排、额度暂停和阶段回报",
+  "exports": { ".": "./index.mjs", "./client": "./client.js", "./package.json": "./package.json" },
+  "files": ["index.mjs", "client.js", "lib", "scripts", "tests", "docs", "README.md", "CHANGELOG.md", "SKILL.md", "references/install.md", "references/protocol.md", "cordis.patch.yml", "requirements.txt"],
+  "scripts": { "test": "node --test tests/*.test.mjs", "check": "node --check index.mjs" },
+  "engines": { "node": ">=22" },
+  "peerDependencies": {
+    "@deepseek-ai/schemastery": "~3.18.4",
+    "@deepseek-ai/dsh-tools": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-subagent": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-llm": "0.2.0-rc.2"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/schemastery": { "optional": true },
+    "@deepseek-ai/dsh-tools": { "optional": true },
+    "@deepseek-ai/dsh-subagent": { "optional": true },
+    "@deepseek-ai/dsh-llm": { "optional": true }
+  },
+  "dsh": { "bundle": { "patch": "./cordis.patch.yml" }, "client": { "platform": "web", "inject": ["@deepseek-ai/dsh-client-ui-layout", "@deepseek-ai/dsh-client-ui-sidebar", "@deepseek-ai/dsh-client-ui-sidebar-right", "@deepseek-ai/dsh-client-ui-session"] } }
+}

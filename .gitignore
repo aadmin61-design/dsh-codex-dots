@@ -1,0 +1,6 @@
+.inspect/
+.runtime/
+*.tgz
+dist/
+__pycache__/
+references/verification.md
