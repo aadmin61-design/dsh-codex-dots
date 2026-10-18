@@ -1,16 +1,14 @@
 // 使用已安装 DSH 的 Electron Node 运行本文件，不安装依赖，不调用任何真实模型。
 // 真实 Cordis/工具 schema 与注册生命周期；用户选择和 agent 投递由测试替身提供。
-const { createRequire, registerHooks } = require('node:module');
+const { registerHooks } = require('node:module');
 const { pathToFileURL } = require('node:url');
 const path = require('node:path');
 const fs = require('node:fs');
 const assert = require('node:assert/strict');
-const vm = require('node:vm');
 
 async function main() {
   const runtime = process.argv[2];
   if (!runtime) throw new Error('用法：Electron --expose-internals dsh-host-smoke.cjs <app.asar/dsh>');
-  const hostRequire = createRequire(path.join(runtime, 'package.json'));
   const hooks = registerHooks({ resolve(specifier, context, next) {
     if (specifier.startsWith('@deepseek-ai/')) return next(specifier, { ...context, parentURL: pathToFileURL(path.join(runtime, 'package.json')).href });
     return next(specifier, context);
@@ -20,7 +18,7 @@ async function main() {
   const { default: Tools } = await import('@deepseek-ai/dsh-tools');
   const { assertV4RowAdmission } = await import('@deepseek-ai/dsh-session-format-v3-to-v4');
   const { loadProfile, createRuntimeResolution, PluginPackages } = await import('@deepseek-ai/dsh-app-boot');
-  const { SlotCore } = await import('@deepseek-ai/dsh-client-ui-slots');
+
   hooks.deregister();
   const anchor = path.join(runtime, 'package.json');
   const profile = loadProfile('dsh', 'desktop', anchor);
@@ -42,23 +40,11 @@ async function main() {
   ctx.provide('subagents', { resolveMaxDepth: () => 1, interrupt: () => {}, startContinuable: async () => ({ childId: 'fixture-child' }) });
   ctx.provide('userQuestions', { ask: async request => { answers.push(request); return { answers: request.questions.map(q => ({ id: q.id, selected: [approved ? '确认' : '取消'] })) }; } });
   try {
-    // 使用真实 SlotCore 校验客户端注册，避免替身遗漏 single/list/keyed 约束。
-    const slots = new SlotCore();
-    const specs = { 'sidebar.panellist': { kind: 'list', scope: 'root' }, main: { kind: 'keyed', scope: 'root' },
-      'conversation.session.header.corner': { kind: 'single', scope: 'session' },
-      'conversation.session.header.utilities': { kind: 'list', scope: 'session' },
-      'sidebar.right.pane.tab': { kind: 'keyed', scope: 'session' }, 'sidebar.right.pane.tab.title': { kind: 'keyed', scope: 'session' } };
-    slots.register({ name: 'root', children: specs }, () => null);
-    slots.register({ name: 'conversation.session.header.corner' }, () => null);
-    const cleanups = []; let browserPlugin;
-    const browser = { window: { __ModuleLoader__: { load: d => { browserPlugin = d.factory(() => ({})); } } },
-      document: { createElement: () => ({ dataset: {}, remove() {} }), head: { append() {} } }, AbortController,
-      setTimeout: () => 0, clearTimeout() {}, console };
-    vm.runInNewContext(fs.readFileSync(path.resolve(__dirname, '../client.js'), 'utf8'), browser);
-    browserPlugin.apply({ effect: fn => { const dispose = fn(); cleanups.push(dispose); return dispose; },
-      slots: { inject: (_name, fn) => fn(), register: (...args) => slots.register(...args) },
-      sidebarRightTabs: { register: () => () => {} }, uiSession: { adapter: { current: { getSnapshot: () => ({}) } } } });
-    for (const dispose of cleanups.reverse()) dispose?.();
+    // 0.2.1 将 slots/primitives 合并进浏览器公共包，不再提供 Node 包入口。
+    // 这里只检查实际发布的客户端依赖；插槽挂载和渲染由本机 UI 验证。
+    const frontend = path.join(runtime, 'node_modules/@deepseek-ai/dsh-web-frontend/dist/assets');
+    const frontendCode = fs.readdirSync(frontend).filter(f => f.endsWith('.js')).map(f => fs.readFileSync(path.join(frontend, f), 'utf8')).join('\n');
+    for (const name of ['@deepseek-ai/dsh-client-ui-slots', '@deepseek-ai/dsh-client-ui-primitives']) assert.ok(frontendCode.includes(name), '客户端公共包缺失：' + name);
     await ctx.plugin(SystemPrompt); await ctx.plugin(Tools);
     const fiber = await ctx.plugin(plugin, { stateDir: root });
     // Cordis 的插件可能异步初始化；等待状态就绪后检查真实注册表。
