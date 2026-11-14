@@ -25,26 +25,31 @@ async function main() {
       readTitleSnapshots: async ids => ids.map(id => ({ status: 'fulfilled', value: { session: records.get(id).session, title: { title: '已有DSH对话' } } })),
       readSession: async id => records.get(id),
     },
-    sessionPersistence: { create: async header => {
+    sessionPersistence: {
+      stat: async id => records.has(id) ? { header: records.get(id).session, revision: String(records.get(id).events.length) } : undefined,
+      open: async id => ({ read: async (offset, length) => ({ events: records.get(id).events.slice(offset, offset + length) }), close: async () => {} }),
+      create: async header => {
       const record = { session: header, events: [] }; records.set(header.id, record);
       return { append: async events => { for (const event of events) assertV4RowAdmission(event); record.events.push(...events); }, flush: async () => {}, close: async () => {} };
     } },
     sessionController: {
-      create: async () => { calls.push('create'); return { sessionId: 'blank-dsh' }; },
-      fork: async request => { calls.push(['fork', request]); return { sessionId: 'fork-dsh' }; },
+      create: async () => { calls.push('create'); records.set('blank-dsh', { session: { version: SESSION_FORMAT_VERSION, id: 'blank-dsh', cwd: project, createdAt: Date.now() }, events: [] }); return { sessionId: 'blank-dsh' }; },
+      fork: async request => { calls.push(['fork', request]); const source = records.get(request.sessionId); records.set('fork-dsh', { session: { ...source.session, id: 'fork-dsh', createdAt: Date.now(), isSeeded: true }, events: source.events.slice() }); return { sessionId: 'fork-dsh' }; },
       rename: async () => {},
     },
     agentDefaultModel: { currentSelection: () => ({ provider: 'deepseek-fixture', model: 'fixture' }) },
-    llm: { prepareCall: async () => ({ config: {}, async *stream(options) {
+    llm: { prepareCall: async config => { assert.equal(config.reasoningEffort,'off');assert.equal(config.maxTokens,512);return { config, async *stream(options) {
       assert.match(options.system, /分支意图/); assert.equal(options.tools, undefined); calls.push('summary');
-      yield { type: 'block-end', index: 0, block: { type: 'text', text: '迁移历史以继续探索' } }; yield { type: 'finish', reason: { kind: 'stop' } };
-    } }) },
+      assert.equal(options.reasoningEffort,'off');
+      yield { type: 'block-start', index: 0, blockType:'text' };yield { type:'text-delta', index:0, text:'迁移历史以' };yield { type:'text-delta', index:0, text:'继续探索' }; yield { type: 'finish', reason: { kind: 'stop' } };
+    } };} },
   };
   const full = '正文开始' + '历史内容'.repeat(2000) + '正文结束';
   const codex = {
     listThreads: async ({ archived }) => ({ data: archived ? [] : [{ id: 'cx-source', cwd: project, title: '来源', parentId: null }], nextCursor: null }),
     readThread: async (_id, { cursor }) => ({ id: 'cx-source', cwd: project, title: '来源', model: 'fixture', nextCursor: cursor ? null : 'older', turns: cursor ? [{ id: 'old', status: 'completed', items: [{ type: 'userMessage', text: '原问题' }, { type: 'agentMessage', text: full }, { type: 'commandExecution', text: '历史输出' }] }] : [{ id: 'new', status: 'completed', items: [{ type: 'userMessage', text: '后续问题' }, { type: 'agentMessage', text: '后续回答' }] }] }),
   };
+  codex.readTurns = async (id, options) => codex.readThread(id, options);
   const service = new DshConversations(ctx, async () => codex);
   try {
     await service.sync(project, true);
@@ -71,7 +76,81 @@ async function main() {
     const after = await new ConversationTree(project).read();
     assert.equal(after.nodes.find(n => n.key === fork.key).reasonStatus, 'error');
     assert.equal(calls.filter(c => c === 'summary').length, 1);
-    console.log(JSON.stringify({ ok: true, checks: ['真实 DSH Session/v4 历史准入', '完整分页与8000字正文', '迁移保留源与原始快照', '原生DSH分支参数', '深度1/2/3', 'DeepSeek摘要流替身与失败状态'] }));
+    // reasoning 预算耗尽和空正文都如实报错，不把思考内容伪装成分支原因。
+    ctx.llm.prepareCall=async()=>({config:{},async *stream(){yield {type:'reasoning-delta',index:0,text:'思考中'};yield {type:'finish',reason:{kind:'max-tokens'}};}});
+    await assert.rejects(service.summarize(project,fork.key),/输出上限/);
+    ctx.llm.prepareCall=async()=>({config:{},async *stream(){yield {type:'finish',reason:{kind:'stop'}};}});
+    await assert.rejects(service.summarize(project,fork.key),/空正文/);
+    // 整个项目通过宿主工作区接口登记；重复同步不会重复导入已映射历史。
+    const before = records.size, progress = service.startCopy(project);
+    assert.equal(service.startCopy(project), progress);
+    await service.copies.get(path.resolve(project)).task;
+    assert.equal(progress.running, false); assert.deepEqual(progress.errors, []);
+    assert.equal(records.size, before + 1);
+    let copied = await new ConversationTree(project).read();
+    const origin = copied.nodes.find(n => n.key === 'codex:cx-source');
+    assert.ok(origin.dshSessionId); assert.ok(attached.includes(origin.dshSessionId));
+    const mirror = copied.nodes.find(n => n.id === origin.dshSessionId);
+    assert.equal(mirror.mirrorOf, origin.key); assert.equal(mirror.depth, origin.depth);
+    assert.equal(copied.workspaceId, workspace.id);
+    const count = records.size;
+    service.startCopy(project); await service.copies.get(path.resolve(project)).task;
+    assert.equal(records.size, count); assert.ok(attached.includes('blank-dsh'));
+    assert.equal((await service.autoSummary(project)).copy.running, false);
+    // 临时会话不访问历史，后台子代理保留元数据但从普通项目计数中排除。
+    records.set('selectionchat-temp-fixture', { session: { id:'selectionchat-temp-fixture',cwd:project,createdAt:1 },events:[] });
+    records.set('internal-worker', { session: { id:'internal-worker',cwd:project,createdAt:2,origin:'subagent',parentSession:'blank-dsh' },events:[] });
+    records.set('broken', { session: { id:'broken',cwd:project,createdAt:Date.now()+100 },events:[] });
+    const originalOpen=ctx.sessionPersistence.open;
+    ctx.sessionPersistence.open=async id=>{ if(id==='selectionchat-temp-fixture')throw Error('临时会话不应被打开');if(id==='broken')throw Error('stored session is corrupt: wrong Session');return originalOpen(id); };
+    await service.sync(project,true);
+    const filtered=await service.treeState(project);
+    assert.ok(!filtered.nodes.some(n=>n.id==='selectionchat-temp-fixture'));
+    assert.equal(filtered.nodes.find(n=>n.id==='internal-worker').internal,true);
+    assert.match(filtered.nodes.find(n=>n.id==='broken').unavailable,/corrupt/);
+    // 空白记录只含初始化事件时隐藏；日志没变不重读，新消息到达后重新展示。
+    const emptyFile=path.join(project,'empty-fixture.log');await fs.writeFile(emptyFile,'initial');
+    const originalStat=ctx.sessionPersistence.stat;let emptyReads=0;
+    records.set('empty-fixture',{session:{id:'empty-fixture',cwd:project,createdAt:Date.now()+200},events:[]});
+    ctx.sessionPersistence.stat=async id=>id==='empty-fixture'?{header:records.get(id).session,location:{path:emptyFile}}:originalStat(id);
+    const checkedOpen=ctx.sessionPersistence.open;
+    ctx.sessionPersistence.open=async id=>{if(id==='empty-fixture')emptyReads++;return checkedOpen(id);};
+    let emptyTree=await service.sync(project,true);
+    assert.equal(emptyTree.nodes.find(n=>n.id==='empty-fixture').empty,true);
+    const readCount=emptyReads;
+    await service.sync(project,true);assert.equal(emptyReads,readCount);
+    records.get('empty-fixture').events=record.events.slice();await fs.appendFile(emptyFile,'new message');
+    emptyTree=await service.sync(project,true);
+    assert.equal(emptyTree.nodes.find(n=>n.id==='empty-fixture').empty,false);
+    assert.ok(emptyReads>readCount);
+    // 前台请求无需等待目录或正文加载完成。
+    const originalList=codex.listThreads;let release;
+    codex.listThreads=async options=>{await new Promise(resolve=>{release=resolve;});return originalList(options);};
+    const cached=await service.requestSync(project,false);
+    assert.ok(cached.nodes.length>0);assert.equal(cached.loading.running,true);
+    while(!release)await new Promise(r=>setTimeout(r,1));release();
+    await service.jobs.get(path.resolve(project)).task;codex.listThreads=originalList;
+    // 持久分支缓存跨服务重启复用；只读前缀，绝不调用全历史接口。
+    const cachedProject=path.join(project,'prefix-project');await fs.mkdir(cachedProject);
+    let pages=0;
+    const prefixClient={listThreads:async({archived})=>({data:archived?[]:['a','b'].map((id,i)=>({id,cwd:cachedProject,title:id,createdAt:i+1,updatedAt:10})),nextCursor:null}),
+      readThread:async()=>{throw Error('索引不能读取完整历史');},
+      readTurns:async(id,options)=>{assert.equal(options.direction,'asc');pages++;return {turns:[{items:[{id:'u',type:'userMessage',text:'共同问题'.repeat(30)},{id:'a',type:'agentMessage',text:'共同回答'.repeat(30)},{id,type:'userMessage',text:id}]}],nextCursor:'不应读取的尾页'};}};
+    const first=new DshConversations(ctx,async()=>prefixClient);
+    await first.sync(cachedProject,true);assert.equal(pages,2);await first.close();
+    const second=new DshConversations(ctx,async()=>prefixClient);
+    await second.sync(cachedProject,true);assert.equal(pages,2);
+    assert.equal(second.jobs.get(path.resolve(cachedProject)).progress.reused,1);
+    ctx.agents.list=()=>[{status:'running'}];second.queue=[cachedProject];
+    await second.preloadNext();assert.equal(second.queue.length,1);
+    ctx.agents.list=()=>[];await second.preloadNext();assert.equal(second.queue.length,0);
+    prefixClient.readLineage=async id=>id==='b'?{id,forked_from_id:'a',forked_from_ordinal_exclusive:6794}:{id};
+    prefixClient.readTurns=async()=>{throw Error('已有 fork 证据不应再次比较正文');};
+    const nativeFork=await second.sync(cachedProject,true);
+    const child=nativeFork.nodes.find(n=>n.id==='b');
+    assert.equal(child.relationSource,'codex-fork');assert.equal(child.parentKey,'codex:a');assert.equal(child.forkedFromOrdinalExclusive,6794);
+    await second.close();
+    console.log(JSON.stringify({ ok: true, checks: ['真实 DSH Session/v4 历史准入', '完整分页与8000字正文', '迁移保留源与原始快照', '原生DSH分支参数', '深度1/2/3', 'DeepSeek摘要关闭思考、增量正文与截断/空正文处理', '完整项目注册与副本同深度', '复制单任务及重复同步无重复', '复制完成轮询状态', '临时会话过滤与损坏隔离', '空白隐藏、缓存复用与新消息恢复', '目录请求即时返回缓存', '重启后前缀结果复用', '忙时暂停后台预载'] }));
   } finally { await service.close(); hook.deregister(); await fs.rm(project, { recursive: true, force: true }); }
 }
 main().catch(error => { console.error(error); process.exitCode = 1; });

@@ -9,6 +9,20 @@ import { ConversationTree } from '../lib/conversation-tree.mjs';
 import { codexToDshEvents, dshHistory } from '../lib/conversation-history.mjs';
 
 const temp = () => fs.mkdtemp(path.join(os.tmpdir(), 'dots-tree-'));
+test('已有深度1节点可补录原生分支，显式根节点不被覆盖，迁移副本不增加深度', async () => {
+  const project = await temp();
+  try {
+    const tree = new ConversationTree(project);
+    await tree.sync([{ source: 'codex', id: 'a' }, { source: 'codex', id: 'b' }]);
+    await tree.sync([{ source: 'codex', id: 'b', parentKey: 'codex:a' }]);
+    assert.equal((await tree.read()).nodes[1].depth, 2);
+    await tree.link('codex:b', null, '从根开始');
+    await tree.sync([{ source: 'codex', id: 'b', parentKey: 'codex:a' }]);
+    assert.equal((await tree.read()).nodes[1].depth, 1);
+    await tree.sync([{ source: 'dsh', id: 'mirror', mirrorOf: 'codex:a' }, { source: 'dsh', id: 'branch', parentKey: 'dsh:mirror' }]);
+    assert.deepEqual((await tree.read()).nodes.map(n => n.depth), [1, 1, 1, 2]);
+  } finally { await fs.rm(project, { recursive: true, force: true }); }
+});
 test('共享树按父子计算深度，同步不覆盖另一端分支摘要，循环不落盘', async () => {
   const project = await temp();
   try {

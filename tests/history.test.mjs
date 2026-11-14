@@ -10,6 +10,19 @@ vm.runInNewContext(fs.readFileSync(new URL('../client.js', import.meta.url), 'ut
   window: { __ModuleLoader__: { load: d => { view = d.factory(() => ({})); } } },
 });
 
+test('分支分页只调用 turns/list，从头小页读取且不转换工具输出', async () => {
+  const client = new CodexClient({ bin: 'unused' }); const calls = [];
+  client.call = async (method, params) => { calls.push({ method, params }); return { data: [{ id: 't', items: [
+    { type:'userMessage', id:'u', content:[{type:'text',text:'问题'}] },
+    { type:'agentMessage', id:'a', text:'完整回答' },
+    { type:'commandExecution', id:'tool', aggregatedOutput:'大段工具输出'.repeat(1000) },
+  ] }], nextCursor:'next' }; };
+  const page = await client.readTurns('thread', { cursor:'start',limit:2,direction:'asc',messagesOnly:true });
+  assert.equal(calls.length,1); assert.equal(calls[0].method,'thread/turns/list');
+  assert.equal(calls[0].params.sortDirection,'asc'); assert.equal(calls[0].params.limit,2);
+  assert.deepEqual(page.turns[0].items.map(i=>i.type),['userMessage','agentMessage']);
+});
+
 test('完整历史保留超过 6000 字的首尾、工具字段与分页游标', async () => {
   const text = '首部\n' + '完整正文'.repeat(4000) + '\n尾部';
   const client = new CodexClient({ bin: 'unused' });

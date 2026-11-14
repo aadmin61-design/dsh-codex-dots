@@ -1,6 +1,6 @@
 {
   "name": "@local/dsh-codex-dots",
-  "version": "2.4.0",
+  "version": "2.6.10",
   "private": true,
   "type": "module",
   "description": "DeepSeek 主导的 Codex / DSH 后台任务编排、额度暂停和阶段回报",
@@ -65,7 +65,6 @@
       "inject": [
         "@deepseek-ai/dsh-client-ui-layout",
         "@deepseek-ai/dsh-client-ui-sidebar",
-        "@deepseek-ai/dsh-client-ui-sidebar-right",
         "@deepseek-ai/dsh-client-ui-session",
         "@deepseek-ai/dsh-client-ui-workspace"
       ]

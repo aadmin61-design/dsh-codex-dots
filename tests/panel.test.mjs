@@ -4,6 +4,21 @@ import fs from 'node:fs';
 import vm from 'node:vm';
 import { installPanelApi } from '../lib/panel-api.mjs';
 
+test('目录握手报告删除能力，删除路由已注册且拒绝未确认请求时返回 JSON', async () => {
+  const routes=new Map();
+  const ctx={connection:{fetch:{register:r=>{routes.set(r.path,r);return()=>routes.delete(r.path);}}}};
+  const service={projects:async()=>({projects:[],errors:[]})};
+  const panel=installPanelApi(ctx,{runs:new Map()},{conversations:()=>service});
+  try{
+    const prefix='http://dsh.internal/api/codex-dots/';
+    const response=await routes.get('/api/codex-dots/conversation-projects').fetch(new Request(prefix+'conversation-projects'));
+    const data=await response.json();assert.equal(data.pluginVersion,'2.6.10');assert.ok(data.capabilities.includes('permanent-delete-v1'));
+    assert.ok(routes.has('/api/codex-dots/conversation-delete-plan'));
+    const denied=await routes.get('/api/codex-dots/conversation-delete-confirm').fetch(new Request(prefix+'conversation-delete-confirm',{method:'POST',body:JSON.stringify({token:'invalid',step:2})}));
+    assert.equal(denied.status,400);assert.match((await denied.json()).error,/确认已失效/);
+  }finally{await panel.close();}
+});
+
 // 只验证面板与宿主协议，不启动模型或打开无认证端口。
 test('面板只读、主对话过滤、接管占用及继续目标校验', async () => {
   const routes = new Map(), messages = []; let opens = 0, closes = 0;
@@ -54,10 +69,12 @@ test('客户端模块声明和原生插槽注册一致，卸载清理面板资�
     uiSession: { adapter: { current: { getSnapshot: () => ({}) } } },
   };
   plugin.apply(ctx);
-  assert.equal(registered.filter(r => r.def).length, 2);
+  assert.equal(registered.filter(r => r.def).length, 0);
+  assert.equal(registered.some(r => r.options?.name === 'conversation.session.header.utilities'), false);
   assert.ok(registered.some(r => r.options?.name === 'sidebar.panellist'));
   assert.ok(registered.some(r => r.options?.label === '项目对话树'));
-  assert.ok(registered.some(r => r.options?.key === 'codex-dots-monitor'));
+  assert.equal(registered.filter(r => r.options?.name === 'sidebar.panellist').length, 1);
+  assert.ok(registered.some(r => r.options?.key === 'codex-dots-tree'));
   for (const dispose of effects.reverse()) dispose?.();
   assert.ok(disposed.includes('style'));
   const manifest = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url)));
