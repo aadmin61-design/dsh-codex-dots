@@ -43,6 +43,96 @@ window.__ModuleLoader__.load({ id: '@local/dsh-codex-dots', factory: require => 
     });
     const result = await response.json(); if (!response.ok) throw new Error(result.error || '面板请求失败'); return result;
   };
+  // 主页面使用宿主导航进入原生 DSH 对话；项目树和两端命令共享磁盘中的父子关系。
+  function ProjectTree({ ctx }) {
+    const [projects, setProjects] = useState([]), [project, setProject] = useState(''), [tree, setTree] = useState(null);
+    const [key, setKey] = useState(''), [messages, setMessages] = useState([]), [error, setError] = useState('');
+    const [busy, setBusy] = useState(false), [loadingHistory, setLoadingHistory] = useState(false), [form, setForm] = useState(null);
+    const [title, setTitle] = useState(''), [intent, setIntent] = useState(''), [summarize, setSummarize] = useState(true);
+    const [parentKey, setParentKey] = useState(''), [filter, setFilter] = useState(''), [cliPath, setCliPath] = useState('');
+    const owner = () => ctx.uiSession.adapter.current.getSnapshot().key || '';
+    const selected = tree?.nodes.find(n => n.key === key);
+    const discover = async signal => { const r = await api('conversation-projects', {}, undefined, signal); setProjects(r.projects); setCliPath(r.cliPath); if (r.errors.length) setError(r.errors.join('\n')); };
+    useEffect(() => { const cancel = new AbortController(); discover(cancel.signal).catch(e => { if (!cancel.signal.aborted) setError(e.message); }); return () => cancel.abort(); }, []);
+    useEffect(() => {
+      if (!project) return;
+      const cancel = new AbortController(); let timer;
+      setTree(null); setKey(''); setMessages([]); setForm(null); setError('');
+      const poll = async () => {
+        try { const data = await api('conversation-tree', { project, owner: owner() }, undefined, cancel.signal); if (!cancel.signal.aborted) setTree(data); }
+        catch (e) { if (!cancel.signal.aborted) setError(e.message); }
+        if (!cancel.signal.aborted) timer = setTimeout(poll, 4000);
+      };
+      api('conversation-sync', {}, { project, includeArchived: true }, cancel.signal).then(data => {
+        if (!cancel.signal.aborted) { setTree(data); if (data.errors.length) setError(data.errors.join('\n')); void poll(); }
+      }).catch(e => { if (!cancel.signal.aborted) { setError(e.message); void poll(); } });
+      return () => { cancel.abort(); clearTimeout(timer); };
+    }, [project]);
+    useEffect(() => {
+      if (!project || !key) return;
+      const cancel = new AbortController(); let timer;
+      setMessages([]); setLoadingHistory(true);
+      const refresh = async () => {
+        try { const result = await api('conversation-history', { project, key }, undefined, cancel.signal); if (!cancel.signal.aborted) { setMessages(result.messages); setLoadingHistory(false); } }
+        catch (e) { if (!cancel.signal.aborted) { setError(e.message); setLoadingHistory(false); } }
+        if (!cancel.signal.aborted) timer = setTimeout(refresh, 5000);
+      };
+      void refresh(); return () => { cancel.abort(); clearTimeout(timer); };
+    }, [project, key]);
+    const act = async action => { setBusy(true); setError(''); try { await action(); } catch (e) { setError(e.message); } finally { setBusy(false); } };
+    const open = id => { ctx.layout.selectPanel(null); ctx.uiWorkspace.openSession(id); };
+    const startForm = kind => { setForm(kind); setTitle(kind === 'new' ? '新对话' : (selected?.title || '对话') + ' · 分支'); setIntent(kind === 'migrate' ? '将 Codex 历史迁移到 DSH，用 DeepSeek 继续' : ''); };
+    const create = () => act(async () => {
+      const result = await api('conversation-create', {}, { project, parentKey: form === 'new' ? undefined : key, title, intent, summarize, owner: owner() });
+      setTree(result.tree); setKey(result.key); setForm(null);
+      if (result.summaryError) setError('对话已创建，分支摘要待补充：' + result.summaryError);
+      else open(result.sessionId);
+    });
+    const reason = node => node.reasonStatus === 'ready' ? node.reason : node.reasonStatus === 'error' ? '摘要失败，可重试' : node.parentKey ? '待 DeepSeek 总结' : '';
+    const renderNode = node => {
+      const children = tree.nodes.filter(n => n.parentKey === node.key);
+      return h('li', { key: node.key },
+        h('button', { className: 'dots-tree-node' + (node.key === key ? ' selected' : ''), onClick: () => { setKey(node.key); setParentKey(node.parentKey || ''); setIntent(node.intent || ''); setForm(null); }, onDoubleClick: () => node.source === 'dsh' && open(node.id), title: node.title },
+          h('span', { className: 'dots-badge' }, node.source === 'dsh' ? 'DSH' : 'Codex'), ' ', node.title,
+          h('small', null, `深度 ${node.depth ?? '?'}${node.archived ? ' · 已归档' : ''}`)),
+        node.parentKey && h('div', { className: 'dots-branch-label', title: node.intent }, '↳ ', reason(node)),
+        node.unresolved && h('div', { className: 'dots-branch-label' }, '来源待关联'),
+        children.length > 0 && h('ul', null, ...children.map(renderNode)));
+    };
+    const roots = tree?.nodes.filter(n => !n.parentKey || !tree.nodes.some(p => p.key === n.parentKey)) || [];
+    return h('div', { className: 'dots-project-page' },
+      h('aside', { className: 'dots-projects' }, h('div', { className: 'dots-head' }, h('strong', null, '项目与对话树'), h('button', { disabled: busy, onClick: () => act(() => discover()) }, '刷新项目')),
+        h('input', { placeholder: '搜索项目', value: filter, onChange: e => setFilter(e.target.value) }),
+        ...projects.filter(p => (p.title + p.path).toLowerCase().includes(filter.toLowerCase())).map(p => h('button', { key: p.path, disabled: busy, className: 'dots-project-pick' + (project === p.path ? ' selected' : ''), onClick: () => setProject(p.path), title: p.path }, '📁 ', p.title, h('small', null, p.sources.join(' + ')))),
+        project && h('div', { className: 'dots-project-branch' }, h('strong', { title: project }, '📁 根目录 · 深度 0'),
+          tree ? h('ul', { className: 'dots-hierarchy' }, ...roots.map(renderNode)) : h('p', null, '正在同步两端对话…'))),
+      h('main', { className: 'dots-project-detail' },
+        h('div', { className: 'dots-head' }, h('div', null, h('strong', null, selected?.title || '项目对话树'), h('div', { className: 'dots-muted' }, project || '从左侧选择项目文件夹')),
+          project && h('div', { className: 'dots-actions' },
+            h('button', { disabled: busy, onClick: () => act(async () => { const r = await api('conversation-sync', {}, { project, includeArchived: true }); setTree(r); setError(r.errors.join('\n')); }) }, '同步两端'),
+            h('button', { disabled: busy, onClick: () => startForm('new') }, '从 0 新开'),
+            selected && h('button', { disabled: busy, onClick: () => startForm(selected.source === 'codex' ? 'migrate' : 'branch') }, selected.source === 'codex' ? '迁移到 DSH 继续' : '新建分支'),
+            selected?.source === 'dsh' && h('button', { className: 'dots-primary', onClick: () => open(selected.id) }, '进入 DSH 对话'))),
+        error && h('div', { className: 'dots-tree-error', role: 'alert' }, error),
+        project && tree && h('div', { className: 'dots-tree-settings' },
+          h('label', null, h('input', { type: 'checkbox', checked: tree.autoSummaries, disabled: busy, onChange: e => { const enabled = e.target.checked; void act(async () => setTree(await api('conversation-settings', {}, { project, autoSummaries: enabled }))); } }), ' 自动用 DeepSeek 总结新分支（消耗少量额度）'),
+          h('details', null, h('summary', null, '与 Codex 共建此树'), h('p', null, '两端共用 ', h('code', null, project + '/.dsh-codex-dots/tree.json'), '。Codex 命令入口：', h('code', null, cliPath), '。使用 list / register / link，修改后本页面自动刷新。分支应填写真实来源 key 和 intent，DeepSeek 再总结原因。'), selected && h('p', null, '当前节点 key：', h('code', null, selected.key)))),
+        form && h('section', { className: 'dots-tree-form' }, h('strong', null, form === 'new' ? '创建深度 1 的空白 DSH 对话' : `创建深度 ${selected?.depth == null ? '?' : selected.depth + 1} 的 DSH 分支`),
+          h('input', { value: title, placeholder: '对话标题', onChange: e => setTitle(e.target.value) }),
+          form !== 'new' && h('textarea', { value: intent, placeholder: '这次为什么分支，希望接下来做什么？', onChange: e => setIntent(e.target.value) }),
+          form !== 'new' && h('label', null, h('input', { type: 'checkbox', checked: summarize, onChange: e => setSummarize(e.target.checked) }), ' 用 DeepSeek 总结分支原因（消耗少量额度）'),
+          h('p', { className: 'dots-muted' }, '保留原对话；历史工具记录不会执行。创建后进入 DSH，由你发送下一条消息。'),
+          h('button', { disabled: busy || !title.trim() || (form !== 'new' && !intent.trim()), className: 'dots-primary', onClick: create }, busy ? '处理中…' : '创建并进入 DSH'),
+          h('button', { disabled: busy, onClick: () => setForm(null) }, '取消')),
+        selected && !form && h('details', { className: 'dots-tree-relation' }, h('summary', null, `分支关系 · ${selected.depth == null ? '来源待关联' : '深度 ' + selected.depth} · ${reason(selected) || '从 0 新开'}`),
+          h('select', { value: parentKey, onChange: e => setParentKey(e.target.value) }, h('option', { value: '' }, '项目根目录（从 0 新开）'), ...tree.nodes.filter(n => n.key !== key).map(n => h('option', { key: n.key, value: n.key }, `${n.source} · ${n.title}`))),
+          h('textarea', { value: intent, placeholder: '真实分支原因', onChange: e => setIntent(e.target.value) }),
+          h('button', { disabled: busy, onClick: () => act(async () => setTree(await api('conversation-link', {}, { project, key, parentKey, intent }))) }, '保存关系'),
+          selected.parentKey && h('button', { disabled: busy, onClick: () => act(async () => setTree(await api('conversation-summary', {}, { project, key, owner: owner() }))) }, 'DeepSeek 总结（消耗额度）'),
+          selected.reasonError && h('p', null, selected.reasonError)),
+        h('div', { className: 'dots-tree-history' },
+          !selected ? h('p', { className: 'dots-empty' }, '选择对话查看完整历史；双击 DSH 节点可直接进入聊天。') : loadingHistory ? h('p', null, '正在读取完整历史…') : messages.length ? messages.map((m, i) => h('article', { key: m.id + ':' + i, className: 'dots-message' }, h('small', { className: 'dots-muted' }, m.role === 'user' ? '用户' : m.role === 'assistant' ? '助手' : '历史工具记录'), h(MarkdownText, { text: m.text, streaming: false, labels: markdownLabels }))) : h('p', null, '此对话还没有消息'))));
+  }
   function apply(ctx) {
     let snapshot = { owner: '', threadId: '', data: { runs: [] }, error: '', query: null };
     const listeners = new Set(), hints = new Map(), selection = new Map(), followed = new Map();
@@ -77,7 +167,7 @@ window.__ModuleLoader__.load({ id: '@local/dsh-codex-dots', factory: require => 
       }
     };
     ctx.effect(() => {
-      const style = document.createElement('style'); style.textContent = css + extraCss; style.dataset.plugin = ID; document.head.append(style);
+      const style = document.createElement('style'); style.textContent = css + extraCss + treeCss; style.dataset.plugin = ID; document.head.append(style);
       let closed = false, timer; const abort = new AbortController();
       const loop = async () => {
         try { await refreshState(abort.signal); } catch (e) { if (!closed) publish({ error: e.message }); }
@@ -200,6 +290,8 @@ window.__ModuleLoader__.load({ id: '@local/dsh-codex-dots', factory: require => 
             h('button', { className: 'dots-primary', disabled: sending || !goal.trim() || !state.owner, onClick: submit }, sending ? '正在提交…' : '交给 DeepSeek 继续'))));
     }
     const bind = (slot, options, Component) => ctx.effect(() => ctx.slots.inject(slot, () => ctx.slots.register({ name: slot, ...options }, Component)));
+    bind('sidebar.panellist', { id: ID + '-tree', label: '项目对话树', order: 19 }, () => h('span', null, '⑂'));
+    bind('main', { key: ID + '-tree' }, () => h(ProjectTree, { ctx }));
     bind('sidebar.panellist', { id: ID, label: 'Codex 对话', order: 20 }, () => h('span', null, '◫'));
     bind('main', { key: ID }, () => h('div', { className: 'dots-shell' }, h(Catalog), h(Viewer)));
     bind('conversation.session.header.utilities', { id: ID, order: 20 }, () => h('button', { className: 'dots-header-button', title: '浏览 Codex 对话', onClick: () => ctx.sidebarRight.openTab(CATALOG) }, 'Codex'));
@@ -209,5 +301,6 @@ window.__ModuleLoader__.load({ id: '@local/dsh-codex-dots', factory: require => 
       bind('sidebar.right.pane.tab.title', { key: kind }, () => h('span', null, title));
     }
   }
-  return { apply, mergeTurns, withLive, inject: ['slots', 'layout', 'uiSession', 'sidebarRight', 'sidebarRightTabs'] };
+  const treeCss = '.dots-project-page{display:flex;height:100%;min-height:0;color:inherit;background:var(--background,transparent)}.dots-projects{width:320px;min-width:230px;overflow:auto;border-right:1px solid #8883;padding:12px}.dots-project-pick{display:block;width:100%;text-align:left;padding:10px;border:0;background:transparent;color:inherit;border-radius:8px;cursor:pointer}.dots-project-pick small,.dots-tree-node small{display:block;opacity:.55;font-size:11px;margin-top:3px}.dots-project-pick.selected,.dots-tree-node.selected{background:#527fff20}.dots-project-branch{margin-top:24px}.dots-hierarchy,.dots-hierarchy ul{list-style:none;padding-left:15px}.dots-hierarchy ul{border-left:1px solid #8885;margin-left:8px}.dots-tree-node{display:block;width:100%;border:0;background:transparent;color:inherit;text-align:left;padding:8px;border-radius:7px;cursor:pointer;overflow-wrap:anywhere}.dots-branch-label{font-size:11px;opacity:.7;padding:0 8px 8px 20px}.dots-project-detail{flex:1;min-width:0;display:flex;flex-direction:column;overflow:hidden}.dots-project-detail>.dots-head{flex-wrap:wrap;gap:12px}.dots-project-page button,.dots-project-page input,.dots-project-page textarea,.dots-project-page select{font:inherit}.dots-projects>input{box-sizing:border-box;width:100%;padding:7px}.dots-tree-settings,.dots-tree-form,.dots-tree-relation{padding:12px 20px;border-bottom:1px solid #8882;font-size:13px}.dots-tree-settings details{margin-top:8px}.dots-tree-form>input,.dots-tree-form>textarea,.dots-tree-relation>textarea,.dots-tree-relation>select{box-sizing:border-box;display:block;width:100%;padding:8px;margin:8px 0}.dots-tree-form button,.dots-tree-relation button{margin:6px 8px 0 0;padding:6px 12px;cursor:pointer}.dots-tree-error{white-space:pre-wrap;background:#c5535312;color:#bf5252;padding:10px 20px}.dots-tree-history{flex:1;overflow:auto;padding:20px 28px}.dots-tree-history .dots-message{max-width:960px;margin:0 auto 24px}.dots-tree-history pre{overflow:auto}.dots-tree-history table{display:block;overflow:auto}@media(max-width:850px){.dots-projects{width:230px;min-width:180px}.dots-tree-history{padding:14px}}';
+  return { apply, mergeTurns, withLive, inject: ['slots', 'layout', 'uiSession', 'uiWorkspace', 'sidebarRight', 'sidebarRightTabs'] };
 } });

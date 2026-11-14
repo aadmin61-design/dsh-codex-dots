@@ -1,16 +1,16 @@
 # 验证范围
 
-本次（2.3.4）验证环境：Windows x64、DSH 0.2.2-rc.3。2.3.3 使用 DSH 0.2.1-rc.3。2.3.2 使用 DSH 0.2.1-rc.2。之前的 2.3.0/2.3.1 使用 DSH 0.2.0-rc.2、Codex CLI 0.163.0。其他系统尚未实测。
+本次（2.4.0）验证环境：Windows x64、DSH 0.2.2-rc.3。2.3.3 使用 DSH 0.2.1-rc.3。2.3.2 使用 DSH 0.2.1-rc.2。之前的 2.3.0/2.3.1 使用 DSH 0.2.0-rc.2、Codex CLI 0.163.0。其他系统尚未实测。
 
 ## 离线测试
 
-在项目目录执行 `node --test tests/*.test.mjs`，共 35 项通过。覆盖额度窗口与边界、用户确认、角色/线程冲突、异步暂停、决策超时提醒、有限重试、恢复续发、完整历史与实时消息合并、面板会话隔离以及 JSON 解析失败的重生成限制。
+在项目目录执行 `node --test tests/*.test.mjs`，共 40 项通过。覆盖额度窗口与边界、用户确认、角色/线程冲突、异步暂停、决策超时提醒、有限重试、恢复续发、完整历史与实时消息合并、面板会话隔离以及 JSON 解析失败的重生成限制。
 
 测试使用协议替身，不调用真实模型，不执行研究实验。发行包解压后也已运行这些测试，防止依赖未打包文件。
 
 ## DSH 宿主检查
 
-使用本机 DSH 安装包自带的 Cordis、Tools、SystemPrompt 运行冒烟测试，检查九个原生工具注册、结构化 schema、用户取消后的零任务、请求错误恢复 waterfall、原生消息准入与卸载清理。模型和用户回答是测试替身，不将其等同于真实模型闭环。
+使用本机 DSH 安装包自带的 Cordis、Tools、SystemPrompt 运行冒烟测试，检查十五个原生工具注册、结构化 schema、用户取消后的零任务、请求错误恢复 waterfall、原生消息准入与卸载清理。模型和用户回答是测试替身，不将其等同于真实模型闭环。
 
 0.2.1 的 slots/primitives 位于浏览器公共包，已不再作为独立 Node 包发布。2.3.2 宿主测试验证公共模块存在，离线测试验证插件插槽注册与资源清理；真实 UI 渲染另行核对，不把替身测试称为真实 SlotCore 测试。
 
@@ -49,3 +49,11 @@
 35 项离线测试通过。宿主检查调用真实 SubagentRuntime.startActivation，并以替身调度器接收任务；使用真实 Cordis 事件、Scope、Tools guard 验证只读子角色可调用 read，拒绝 write 和 spawn_agent，主对话不受影响，冷恢复后权限仍生效。验证暂停/确认恢复后续发同一子对话及第二次完成事件。ZIP/TGZ 源码包已生成，TGZ 解包后测试与宿主检查通过。
 
 侧栏宿主模块、会话选择和插槽接口做了静态核对。未使用 Computer Use，未重启用户应用，未调用真实模型或执行实验；实际 UI 和流式输出由用户按 [手动验收](manual-test-2.3.4.md) 检查。现有截图继续标注其原版本。
+
+## 2.4.0 项目对话树与迁移
+
+40 项离线测试通过，新增深度 1/2/3、父子关系循环拒绝、跨进程并发合并、来源未知处理、完整文本迁移及摘要失败不重复创建验证。静态检查核对了本机 DSH 的 sessionQuery、sessionPersistence、workspaceRegistry、sessionController、uiWorkspace.openSession 和 llm.prepareCall 接口；Codex 来源关系依据本机 CLI 生成的 forkedFromId/parentThreadId schema。
+
+使用本机 DSH Electron Node 运行 scripts/dsh-tree-smoke.cjs，通过真实 Session.create 和 v4 admission 验证迁移记录可被宿主读取，包括超过 8000 字正文、分页历史和工具记录不执行。原生 create/fork 参数、workspace attach 和模型摘要流采用测试替身，不写入用户真实会话、不调用模型。原 scripts/dsh-host-smoke.cjs 的十五工具注册、暂停恢复和权限回归也通过。
+
+发行包解包后的离线测试与两项宿主检查通过。真实 DSH UI、导入后实际模型接续和 DeepSeek 摘要由用户按 [手动验收](conversation-tree.md#手动验收) 操作；没有使用 Computer Use。

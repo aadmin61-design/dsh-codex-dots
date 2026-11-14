@@ -90,3 +90,7 @@ DSH 管理的插件行 `local-codex-dots` 支持：
 已对照本机 DSH 0.2.0-rc.2 的 `dsh-agent`、`dsh-tools`、`dsh-user-questions`、`dsh-subagent` 与 `dsh-tool-subagent` 安装包，以及 Codex CLI 0.163.0 生成的 JSON Schema。
 
 官方接口说明：[Codex App Server](https://learn.chatgpt.com/docs/app-server)、[终端 /statusline](https://learn.chatgpt.com/docs/developer-commands?surface=cli)。本机安装包静态检查 REA 证据：`ev_560018d57fce22bc1f6be2630de821003161b4166710f04634d5f9d199325c8d`，DSH ASAR SHA-256：`983ca71114e6dfd353fc79af5a1f9481a250ee64c2a3c757673029b811b23bc2`。静态证据不等于真实模型运行结果。
+
+## 2.4.0 项目对话树
+
+新增 dots_projects、dots_tree、dots_conversation_read、dots_conversation_create、dots_tree_link、dots_branch_summary。共享文件格式、CLI、迁移语义与额度说明见 [项目对话树](../docs/conversation-tree.md)。树的写入使用项目级短时锁，模型摘要不持锁；旧编排任务锁及额度边界保持不变。

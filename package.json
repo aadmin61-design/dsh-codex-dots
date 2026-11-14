@@ -1,6 +1,6 @@
 {
   "name": "@local/dsh-codex-dots",
-  "version": "2.3.4",
+  "version": "2.4.0",
   "private": true,
   "type": "module",
   "description": "DeepSeek 主导的 Codex / DSH 后台任务编排、额度暂停和阶段回报",
@@ -36,7 +36,8 @@
     "@deepseek-ai/schemastery": "~3.18.4 || ~3.19.0",
     "@deepseek-ai/dsh-tools": "0.2.0-rc.2 || 0.2.1-rc.2 || 0.2.1-rc.3 || 0.2.2-rc.3",
     "@deepseek-ai/dsh-subagent": "0.2.0-rc.2 || 0.2.1-rc.2 || 0.2.1-rc.3 || 0.2.2-rc.3",
-    "@deepseek-ai/dsh-llm": "0.2.0-rc.2 || 0.2.1-rc.2 || 0.2.1-rc.3 || 0.2.2-rc.3"
+    "@deepseek-ai/dsh-llm": "0.2.0-rc.2 || 0.2.1-rc.2 || 0.2.1-rc.3 || 0.2.2-rc.3",
+    "@deepseek-ai/dsh-session": "0.2.2-rc.3"
   },
   "peerDependenciesMeta": {
     "@deepseek-ai/schemastery": {
@@ -50,6 +51,9 @@
     },
     "@deepseek-ai/dsh-llm": {
       "optional": true
+    },
+    "@deepseek-ai/dsh-session": {
+      "optional": true
     }
   },
   "dsh": {
@@ -62,7 +66,8 @@
         "@deepseek-ai/dsh-client-ui-layout",
         "@deepseek-ai/dsh-client-ui-sidebar",
         "@deepseek-ai/dsh-client-ui-sidebar-right",
-        "@deepseek-ai/dsh-client-ui-session"
+        "@deepseek-ai/dsh-client-ui-session",
+        "@deepseek-ai/dsh-client-ui-workspace"
       ]
     }
   }

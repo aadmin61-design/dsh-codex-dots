@@ -4,3 +4,4 @@
 dist/
 __pycache__/
 references/verification.md
+.dsh-codex-dots/

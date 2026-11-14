@@ -56,9 +56,25 @@ test('客户端模块声明和原生插槽注册一致，卸载清理面板资�
   plugin.apply(ctx);
   assert.equal(registered.filter(r => r.def).length, 2);
   assert.ok(registered.some(r => r.options?.name === 'sidebar.panellist'));
+  assert.ok(registered.some(r => r.options?.label === '项目对话树'));
   assert.ok(registered.some(r => r.options?.key === 'codex-dots-monitor'));
   for (const dispose of effects.reverse()) dispose?.();
   assert.ok(disposed.includes('style'));
   const manifest = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url)));
   assert.equal(manifest.exports['./client'], './client.js'); assert.equal(manifest.dsh.client.platform, 'web');
+  assert.ok(manifest.dsh.client.inject.includes('@deepseek-ai/dsh-client-ui-workspace'));
+});
+
+test('迁移成功但摘要失败时返回已创建对话，避免用户误判而重复迁移', async () => {
+  const routes = new Map(); let creates = 0;
+  const ctx = { connection: { fetch: { register: r => { routes.set(r.path, r); return () => routes.delete(r.path); } } } };
+  const conversations = { create: async () => { creates++; return { sessionId: 'created', key: 'dsh:created', tree: { nodes: [] } }; }, summarize: async () => { throw Error('额度不足'); } };
+  const panel = installPanelApi(ctx, { runs: new Map() }, { conversations: () => conversations });
+  try {
+    const response = await routes.get('/api/codex-dots/conversation-create').fetch(new Request('http://dsh.internal/api/codex-dots/conversation-create', {
+      method: 'POST', body: JSON.stringify({ project: 'fixture', parentKey: 'codex:source', summarize: true }),
+    }));
+    const result = await response.json();
+    assert.equal(response.status, 200); assert.equal(result.sessionId, 'created'); assert.equal(result.summaryError, '额度不足'); assert.equal(creates, 1);
+  } finally { await panel.close(); }
 });

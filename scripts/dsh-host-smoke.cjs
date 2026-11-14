@@ -98,7 +98,7 @@ async function main() {
     // Cordis 的插件可能异步初始化；等待状态就绪后检查真实注册表。
     for (let n = 0; n < 100 && !ctx.tools?.get('dots_start'); n++) await new Promise(r => setTimeout(r, 20));
     const schemas = ctx.tools.schemas();
-    assert.equal(schemas.filter(t => t.name.startsWith('dots_')).length, 9);
+    assert.equal(schemas.filter(t => t.name.startsWith('dots_')).length, 15);
     const startSchema = schemas.find(t => t.name === 'dots_start');
     assert.match(JSON.stringify(startSchema), /"workers":\{"type":"array"/);
     // 经真实 Cordis waterfall 验证挂钩，模型响应用缺括号的固定数据，不调用真实模型。
@@ -150,5 +150,6 @@ async function main() {
   }
 }
 main().catch(e => { console.error(e); process.exitCode = 1; });
+
 
 
