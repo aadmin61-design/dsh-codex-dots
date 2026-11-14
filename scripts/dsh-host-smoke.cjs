@@ -17,8 +17,19 @@ async function main() {
   const { default: SystemPrompt } = await import('@deepseek-ai/dsh-system-prompt');
   const { default: Tools } = await import('@deepseek-ai/dsh-tools');
   const { assertV4RowAdmission } = await import('@deepseek-ai/dsh-session-format-v3-to-v4');
-  const { loadProfile, createRuntimeResolution, PluginPackages } = await import('@deepseek-ai/dsh-app-boot');
+  const { loadProfile, createRuntimeResolution, PluginPackages, evaluatePluginCompatibility, getDshRuntimeVersion } = await import('@deepseek-ai/dsh-app-boot');
 
+  const { SubagentRuntime } = await import('@deepseek-ai/dsh-subagent');
+  const { createScope } = await import('@deepseek-ai/dsh-scope');
+  const hostVersion = getDshRuntimeVersion();
+  const manifest = JSON.parse(fs.readFileSync(path.resolve(__dirname, '../package.json'), 'utf8'));
+  // 先通过真实宿主的加载门槛；仅直接 import 成功不足以证明插件可启用。
+  assert.equal(evaluatePluginCompatibility(manifest, {}, hostVersion), undefined, '宿主会拒绝当前依赖范围');
+  const legacyManifest = { ...manifest, peerDependencies: { '@deepseek-ai/dsh-tools': '0.2.0-rc.2' } };
+  if (hostVersion !== '0.2.0-rc.2') assert.ok(evaluatePluginCompatibility(legacyManifest, {}, hostVersion));
+  const nativeStart = typeof SubagentRuntime.prototype.startActivation === 'function' ? 'startActivation' : 'startContinuable';
+  const flatActivation = typeof SubagentRuntime.prototype.rootOf === 'function';
+  for (const method of [nativeStart, 'sendMessage', 'interrupt', 'resolveMaxDepth']) assert.equal(typeof SubagentRuntime.prototype[method], 'function', '宿主缺少接口 ' + method);
   hooks.deregister();
   const anchor = path.join(runtime, 'package.json');
   const profile = loadProfile('dsh', 'desktop', anchor);
@@ -37,7 +48,44 @@ async function main() {
   const answers = [];
   let approved = false;
   ctx.provide('agents', { get: id => id === parent.id ? parent : undefined });
-  ctx.provide('subagents', { resolveMaxDepth: () => 1, interrupt: () => {}, startContinuable: async () => ({ childId: 'fixture-child' }) });
+  let starts = 0, followups = 0, fixtureChildId = 'fixture-child', policyChecks = 0;
+  const checkChildPolicy = async id => {
+    const agent = { id }; const childScope = createScope(ctx, agent); agent.ctx = childScope.ctx;
+    try {
+      await ctx.serial('agent/created', { agent });
+      // 使用真实 Tools 守卫验证子作用域，不把提示词当作权限约束。
+      assert.equal(ctx.tools.checkGuards({ agent, name: 'read' }), undefined);
+      assert.match(ctx.tools.checkGuards({ agent, name: 'write' }).reason, /权限/);
+      assert.match(ctx.tools.checkGuards({ agent, name: 'spawn_agent' }).reason, /权限/);
+      assert.equal(ctx.tools.checkGuards({ agent: parent, name: 'write' }), undefined);
+      policyChecks++;
+    } finally { await childScope.dispose(); }
+  };
+  ctx.provide('subagents', { resolveMaxDepth: () => 1, interrupt: () => {},
+    ...(flatActivation ? { rootOf: () => parent } : {}),
+    [nativeStart]: async spec => {
+      starts++;
+      if (flatActivation) {
+        // 经真实 startActivation 检查平铺参数；只替换最终调度器，不运行模型。
+        return SubagentRuntime.prototype.startActivation.call({
+          expectProvider: () => ({ prepareContinuable() {} }), assertCapabilities() {}, ctx,
+          requireManager: () => ({ async startLocal(actual) {
+            assert.equal(actual.parent, parent); assert.equal(actual.delivery, 'parent');
+            assert.equal(actual.agentOptions.provider, 'deepseek'); assert.equal(actual.request, undefined);
+            fixtureChildId = actual.childId; assert.ok(fixtureChildId);
+            await checkChildPolicy(fixtureChildId);
+            return { childId: fixtureChildId, result: Promise.resolve({ output: [], stopReason: 'completed' }) };
+          } }),
+        }, spec);
+      }
+      assert.equal(spec.request.parent, parent); assert.deepEqual(spec.request.toolFilter.allow, ['read', 'read_image', 'glob', 'grep']);
+      if (nativeStart === 'startActivation') assert.equal(spec.delivery, 'parent');
+      return { childId: 'fixture-child', result: Promise.resolve({ output: [], stopReason: 'completed' }) };
+    }, sendMessage: async (_parent, id) => {
+      assert.equal(id, fixtureChildId);
+      if (flatActivation) await checkChildPolicy(id); // 模拟冷恢复，检查已保存角色重新施加权限。
+      followups++;
+    } });
   ctx.provide('userQuestions', { ask: async request => { answers.push(request); return { answers: request.questions.map(q => ({ id: q.id, selected: [approved ? '确认' : '取消'] })) }; } });
   try {
     // 0.2.1 将 slots/primitives 合并进浏览器公共包，不再提供 Node 包入口。
@@ -71,11 +119,27 @@ async function main() {
     assert.equal(answers.length, 1);
     assert.equal(fs.readdirSync(root).filter(x => /^run-/.test(x)).length, 0);
     approved = true;
-    const run = await tool.execute({ proposal: { goal: '通知测试', plan: '使用测试替身，立即暂停', workers: [{ name: 'read', backend: 'deepseek', role: '读取', cwd: root, instruction: '无需执行' }] } }, execution);
+    const started = await tool.execute({ proposal: { goal: '通知测试', plan: '使用测试替身，立即暂停', workers: [{ name: 'read', backend: 'deepseek', role: '读取', cwd: root, instruction: '无需执行' }] } }, execution);
+    const run = await ctx.tools.get('dots_status').execute({ runId: started.id }, execution);
     assert.equal(answers.at(-1).questions[0].intent.callId, undefined);
+    const waitFor = async predicate => { for (let n = 0; n < 100; n++) { if (predicate()) return; await new Promise(r => setTimeout(r, 10)); } assert.fail('子对话状态未到达：' + run.reason + JSON.stringify(run.workers)); };
+    await waitFor(() => run.workers[0].childId);
+    assert.equal(starts, 1);
+    // 模型输出替身经真实 Cordis 生命周期事件进入引擎；不消耗模型额度。
+    ctx.emit('subagent/end', { id: fixtureChildId, stopReason: 'completed', lastAssistantMessage: [{ type: 'text', text: '第一轮结果' }] });
+    await waitFor(() => run.workers[0].status === 'awaiting-decision');
+    assert.match(run.workers[0].reply, /第一轮结果/);
     await ctx.tools.get('dots_control').execute({ runId: run.id, action: 'pause' }, execution);
+    await ctx.tools.get('dots_control').execute({ runId: run.id, action: 'resume' }, execution);
+    await ctx.tools.get('dots_dispatch').execute({ runId: run.id, worker: 'read', instruction: '第二轮协议替身', decisionId: run.workers[0].decision.id }, execution);
+    await waitFor(() => followups === 1);
+    assert.equal(starts, 1, '恢复后应续接原子对话');
+    ctx.emit('subagent/end', { id: fixtureChildId, stopReason: 'completed', lastAssistantMessage: [{ type: 'text', text: '第二轮结果' }] });
+    await waitFor(() => run.workers[0].status === 'awaiting-decision');
+    assert.match(run.workers[0].reply, /第二轮结果/);
     assert.ok(notifications.length > 0);
-    console.log(JSON.stringify({ ok: true, runtime, tools: schemas.filter(t => t.name.startsWith('dots_')).map(t => t.name), checks: ['真实 DSH 结构化 schema 注册', '真实 Cordis 解析错误恢复挂钩与次数限制', '用户取消后零任务', '计划采用临时资源', '通知通过 v4 admission', '插件卸载清理'] }));
+    if (flatActivation) assert.equal(policyChecks, 2);
+    console.log(JSON.stringify({ ok: true, runtime, hostVersion, nativeStart, tools: schemas.filter(t => t.name.startsWith('dots_')).map(t => t.name), checks: ['真实宿主兼容门槛与原生子对话接口', '完成事件、暂停恢复及原子对话续发', '真实 DSH 结构化 schema 注册', '真实 Cordis 解析错误恢复挂钩与次数限制', '用户取消后零任务', '计划采用临时资源', '通知通过 v4 admission', '插件卸载清理'] }));
     await fiber.dispose();
     assert.equal(ctx.tools.get('dots_start'), undefined);
     assert.equal(fs.existsSync(path.join(root, 'host.lock')), false);
@@ -86,3 +150,5 @@ async function main() {
   }
 }
 main().catch(e => { console.error(e); process.exitCode = 1; });
+
+

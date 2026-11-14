@@ -1,6 +1,7 @@
 import path from 'node:path';
 import os from 'node:os';
 import fs from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import z from '@deepseek-ai/schemastery';
 import { defineTool } from '@deepseek-ai/dsh-tools';
 import { parentAgentOptionsForDelegation } from '@deepseek-ai/dsh-subagent';
@@ -10,6 +11,7 @@ import { CodexClient } from './lib/codex.mjs';
 import { installPanelApi } from './lib/panel-api.mjs';
 import { proposalSchema } from './lib/proposal-schema.mjs';
 import { createRequestRecovery } from './lib/request-recovery.mjs';
+import { startNativeChild, usesFlatActivation, applyChildPolicy } from './lib/dsh-subagent.mjs';
 
 export const name = 'dsh-codex-dots';
 export const inject = ['tools', 'agents', 'subagents', 'userQuestions', 'systemPrompt'];
@@ -27,6 +29,11 @@ const j = (description, required = true) => ({ type: 'json', description, ...(re
 
 export async function apply(ctx, config) {
   let disposed = false;
+  const pendingChildren = new Map();
+  const childPolicy = worker => ({
+    toolFilter: { allow: ['read', 'read_image', 'glob', 'grep', ...(worker.sandbox === 'workspace-write' ? ['write', 'edit', 'bash', 'pwsh'] : [])] },
+    persona: `你是 DeepSeek 子对话，职责为 ${worker.role}。工作目录 ${worker.cwd}。只完成当前指令，关键代码中文注释。不可扩大目录/权限，不可创建其他子 agent。完成后给出证据并结束。`,
+  });
   ctx.on('agent/request-error', createRequestRecovery({ warn: text => ctx.logger.warn(text), isDisposed: () => disposed }));
   ctx.effect(() => () => { disposed = true; });
   const liveParent = run => {
@@ -57,14 +64,17 @@ export async function apply(ctx, config) {
         }
         const model = parentAgentOptionsForDelegation(parent);
         if (!/deepseek/i.test(model.provider || '')) throw new Error('主对话需要选择 DeepSeek 提供方，子对话继承其模型');
-        const allow = ['read', 'read_image', 'glob', 'grep'];
-        if (worker.sandbox === 'workspace-write') allow.push('write', 'edit', 'bash', 'pwsh');
-        const result = await ctx.subagents.startContinuable({ provider: config.subagentProvider, label: worker.name,
-          request: { parent, label: worker.name, prompt: [{ type: 'text', text: prompt }],
-            agentOptions: model, toolFilter: { allow }, maxDepth: ctx.subagents.resolveMaxDepth(),
-            persona: `你是 DeepSeek 子对话，职责为 ${worker.role}。工作目录 ${worker.cwd}。只完成当前指令，关键代码中文注释。不可扩大目录/权限，不可创建其他子 agent。完成后给出证据并结束。` },
-          signal: new AbortController().signal });
-        return result.childId;
+        const policy = childPolicy(worker);
+        // 预留 ID 让创建钩子在首条消息执行前识别本插件子对话；完成后由任务状态负责续接。
+        const childId = usesFlatActivation(ctx.subagents) ? randomUUID() : undefined;
+        if (childId) pendingChildren.set(childId, policy);
+        try {
+          const result = await startNativeChild(ctx.subagents, { provider: config.subagentProvider, label: worker.name, ...(childId ? { childId } : {}),
+            request: { parent, label: worker.name, prompt: [{ type: 'text', text: prompt }],
+              agentOptions: model, ...policy, maxDepth: ctx.subagents.resolveMaxDepth() },
+            signal: new AbortController().signal }, error => { if (!disposed) engine.reportError(run, error); });
+          return result.childId;
+        } finally { if (childId) pendingChildren.delete(childId); }
       },
       async stop(run, worker) {
         if (worker.childId) ctx.subagents.interrupt(worker.childId, { kind: 'ancestor', agent: liveParent(run) });
@@ -87,6 +97,12 @@ export async function apply(ctx, config) {
   ctx.effect(() => () => engine.close());
   ctx.on('subagent/end', (result) => { void engine.childEnded(result.id, result); });
   ctx.on('agent/created', ({ agent }) => {
+    if (usesFlatActivation(ctx.subagents)) {
+      // 冷恢复会重新创建 Agent，必须从已保存的角色配置重新施加工具范围。
+      const worker = [...engine.runs.values()].flatMap(run => run.workers).find(w => w.backend === 'deepseek' && w.childId === agent.id);
+      const policy = pendingChildren.get(agent.id) ?? (worker && childPolicy(worker));
+      if (policy) applyChildPolicy(agent, policy);
+    }
     for (const run of engine.runs.values()) if (run.owner === agent.id) void engine.flush(run);
   });
 
