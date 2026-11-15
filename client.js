@@ -24,7 +24,6 @@ window.__ModuleLoader__.load({ id: '@local/dsh-codex-dots', factory: require => 
     return saved ? turns.map(t => t.id === live.id ? merged : t) : [merged, ...turns];
   }
   const ID = 'codex-dots-tree';
-  const STANDALONE = 'standalone-conversations';
   const labels = { running: '执行中', starting: '准备中', queued: '排队', 'awaiting-decision': '等待决策', paused: '已暂停', stopping: '收尾中', completed: '已完成', cancelled: '已取消', ready: '待启动' };
   const api = async (endpoint, params = {}, body, signal) => {
     const transport = globalThis.__DSH_TRANSPORT__;
@@ -35,7 +34,7 @@ window.__ModuleLoader__.load({ id: '@local/dsh-codex-dots', factory: require => 
     // 宿主未注册路由时返回纯文本 not found，不能无条件作为 JSON 解析。
     const raw = await response.text(); let result;
     try { result = JSON.parse(raw); } catch {
-      if (response.status===404) throw Error('DSH 尚未加载此接口（'+endpoint+'）。请完全退出 DSH 后重开，确认前后端均为 2.6.11。');
+      if (response.status===404) throw Error('DSH 尚未加载此接口（'+endpoint+'）。请完全退出 DSH 后重开，确认前后端均为 2.6.14。');
       throw Error('接口 '+endpoint+' 返回异常（HTTP '+response.status+'）：'+raw.slice(0,240));
     }
     if (!response.ok) throw Error(result.error || '请求失败（HTTP '+response.status+'）'); return result;
@@ -79,23 +78,33 @@ window.__ModuleLoader__.load({ id: '@local/dsh-codex-dots', factory: require => 
   }
   // 宽树首次打开定位根球；刷新正文或用户手动滚动时不抢回视角。
   function treeScrollLeft(model, viewportWidth) { return Math.max(0, model.root.x - viewportWidth / 2); }
-  // 项目位置采用稳定随机散布，刷新不会整屏跳位；数量只影响有限范围内的球径。
   const projectSide = p => p.sources.includes('codex') ? 'codex' : 'dsh';
   const projectSize = count => Math.min(156, 88 + Math.log2(1 + Math.max(0, count || 0)) * 12);
-  function scatterProjects(projects, width, height) {
-    const placed = []; width = Math.max(260, width); height = Math.max(400, height);
-    let seed = 74129; const random = () => { seed = (seed * 1664525 + 1013904223) >>> 0; return seed / 4294967296; };
-    for (const p of projects) {
-      const size = projectSize(p.count); let x, y, found = false;
-      for (let attempt = 0; !found; attempt++) {
-        if (attempt && attempt % 100 === 0) height += 180;
-        x = size / 2 + 20 + random() * Math.max(0, width - size - 40);
-        y = size / 2 + 25 + random() * Math.max(0, height - size - 50);
-        found = placed.every(q => Math.hypot(q.x-x,q.y-y) > (q.size+size)/2 + 28);
+  function scatterProjects(projects, width, height, diameter = p => projectSize(p.count)) {
+    width = Math.max(120, width); height = Math.max(200, height);
+    const ranked = [...projects].sort((a, b) => (b.recentAt || 0) - (a.recentAt || 0));
+    const size = p => Math.min(diameter(p), width - 24);
+    const largest = Math.max(88, ...ranked.map(size));
+    const pitch = largest + 52;
+    const columns = Math.max(1, 2 * Math.floor((width - largest - 24) / (2 * pitch)) + 1);
+    const rows = Math.max(1, 2 * Math.floor((height - largest - 24) / (2 * pitch)) + 1);
+    const points = [];
+    // 从首屏中心向四周分配位置，装不下的旧记录向下延伸，中心不会随内容高度移动。
+    const addRow = (y, row) => {
+      for (let col = 0; col < columns; col++) {
+        const x = width / 2 + (col - (columns - 1) / 2) * pitch;
+        const jitter = Math.sin((row * columns + col) * 12.9898) * 8;
+        points.push({ x: Math.max(largest / 2 + 8, Math.min(width - largest / 2 - 8, x + jitter)), y });
       }
-      placed.push({ ...p, size, x, y });
-    }
-    return { projects: placed, height };
+    };
+    for (let row = 0; row < rows; row++) addRow(height / 2 + (row - (rows - 1) / 2) * pitch, row);
+    // 中心留给第一项，其余球按到中心的距离获得位置。
+    points.sort((a, b) => Math.hypot(a.x - width / 2, a.y - height / 2) - Math.hypot(b.x - width / 2, b.y - height / 2));
+    points[0] = { x: width / 2, y: height / 2 };
+    const lastY = height / 2 + (rows - 1) / 2 * pitch;
+    for (let extra = 1; points.length < ranked.length; extra++) addRow(lastY + extra * pitch, rows + extra);
+    const placed = ranked.map((p, i) => ({ ...p, ...points[i], size: size(p) }));
+    return { projects: placed, height: Math.max(height, ...placed.map(p => p.y + p.size / 2 + 24)) };
   }
   // 同一路径的项目可在主页、侧栏、树根之间连续移动；代理层跨过滚动容器的裁剪边界。
   function createOrbitalMotion(root, layer) {
@@ -157,9 +166,15 @@ window.__ModuleLoader__.load({ id: '@local/dsh-codex-dots', factory: require => 
   }
   const css = `
 .dots-orbit{container-type:inline-size;height:100%;min-height:0;display:flex;flex-direction:column;position:relative;isolation:isolate;overflow:hidden;color:var(--dsw-alias-label-primary,#26344c);font:14px/1.6 system-ui,sans-serif;background:radial-gradient(ellipse at 20% 20%,#b9c8fa30,transparent 60%),radial-gradient(ellipse at 85% 70%,#a0e6d329,transparent 55%),var(--dsw-alias-background-primary,#f8fafc)}
-.dots-orbit *{box-sizing:border-box}.dots-orbit button,.dots-orbit input,.dots-orbit textarea,.dots-orbit select{font:inherit;color:inherit}.dots-orbit button{cursor:pointer}.dots-orbit button:disabled{opacity:.45;cursor:wait}.dots-bar{padding:20px 26px;display:grid;grid-template-columns:minmax(0,1fr) minmax(260px,680px) minmax(0,1fr);gap:18px;align-items:center;z-index:3;border-bottom:1px solid #9baec71a}.dots-actions{grid-column:3;display:flex;justify-self:end;align-items:center;gap:10px;white-space:nowrap}.dots-actions .dots-back{font-weight:650;color:#334c7b;background:#b6c9f580;border-color:#8ea9df90;box-shadow:0 4px 16px #7793cc24;padding-inline:20px}.dots-actions .dots-back:hover{background:#adc3f5b0}.dots-spacer{flex:1}.dots-chip{border:1px solid #9eafce40;background:#ffffff32;backdrop-filter:blur(18px);border-radius:24px;padding:7px 14px}.dots-search{grid-column:2;width:100%;min-width:0;border:1px solid #9eafce45;background:#ffffff50;backdrop-filter:blur(18px);border-radius:28px;padding:12px 22px;outline:none;transition:border-color .2s,box-shadow .2s}.dots-search:focus{border-color:#91aadc;box-shadow:0 0 0 3px #9eafd222}.dots-legend{padding:10px 26px;display:flex;gap:20px;font-size:12px;opacity:.75}.dots-dot{display:inline-block;width:9px;height:9px;margin-right:7px;border-radius:50%;background:#a9b9f1}.dots-dot.dsh{background:#8bd7bf}.dots-workspace{display:flex;flex:1;min-height:0;position:relative}.dots-space{flex:1;min-width:0;overflow:auto;position:relative;scroll-behavior:smooth}.dots-galaxy{position:relative;min-height:100%;width:100%}.dots-project-orbit{position:relative;width:150px;height:150px;transform-origin:0 0}
+.dots-orbit *{box-sizing:border-box}.dots-orbit button,.dots-orbit input,.dots-orbit textarea,.dots-orbit select{font:inherit;color:inherit}.dots-orbit button{cursor:pointer}.dots-orbit button:disabled{opacity:.45;cursor:wait}.dots-bar{padding:20px 26px;display:grid;grid-template-columns:minmax(0,1fr) minmax(260px,680px) minmax(0,1fr);gap:18px;align-items:center;z-index:3;border-bottom:1px solid #9baec71a}.dots-actions{grid-column:3;display:flex;justify-self:end;align-items:center;gap:10px;white-space:nowrap}.dots-actions .dots-back{font-weight:650;color:#334c7b;background:#b6c9f580;border-color:#8ea9df90;box-shadow:0 4px 16px #7793cc24;padding-inline:20px}.dots-actions .dots-back:hover{background:#adc3f5b0}.dots-spacer{flex:1}.dots-chip{border:1px solid #9eafce40;background:#ffffff32;backdrop-filter:blur(18px);border-radius:24px;padding:7px 14px}.dots-search{grid-column:2;width:100%;min-width:0;border:1px solid #9eafce45;background:#ffffff50;backdrop-filter:blur(18px);border-radius:28px;padding:12px 22px;outline:none;transition:border-color .2s,box-shadow .2s}.dots-search:focus{border-color:#91aadc;box-shadow:0 0 0 3px #9eafd222}.dots-legend{padding:10px 26px;display:flex;flex-wrap:wrap;gap:8px 20px;font-size:12px;opacity:.75}.dots-dot{display:inline-block;width:9px;height:9px;margin-right:7px;border-radius:50%;background:#a9b9f1}.dots-dot.dsh{background:#8bd7bf}.dots-workspace{display:flex;flex:1;min-height:0;position:relative}.dots-space{flex:1;min-width:0;overflow:auto;position:relative;scroll-behavior:smooth}.dots-galaxy{position:relative;min-height:100%;width:100%}.dots-project-orbit{position:relative;width:150px;height:150px;transform-origin:0 0}
 .dots-ball{border-radius:50%;border:1px solid #ffffffb0;background:radial-gradient(circle at 28% 20%,#ffffffb0,transparent 62%),linear-gradient(135deg,#c6d5ff70,#cfc4f24d);backdrop-filter:blur(18px) saturate(135%);box-shadow:inset 0 0 24px #ffffff40,0 16px 45px #667bb21a,0 3px 8px #8094bd12;display:flex;align-items:center;justify-content:center;flex-direction:column;text-align:center;padding:18px;transition:transform .3s,border-color .3s;width:100%;height:100%;overflow-wrap:anywhere}
-.dots-ball.dsh{background:radial-gradient(circle at 28% 20%,#ffffffb0,transparent 62%),linear-gradient(135deg,#bcecd770,#bde3eb4d)}.dots-ball:hover,.dots-ball:focus-visible{transform:scale(1.08);box-shadow:inset 0 0 24px #ffffff60,0 18px 48px #6d86b92c;border-color:#fff;outline:2px solid #9eafd233;outline-offset:4px}.dots-ball strong{display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:3;overflow:hidden;font-size:14px;font-weight:550;line-height:1.5}.dots-ball small{font-size:10px;opacity:.65;margin-top:7px}.dots-project-orbit>.dots-ball{animation:dots-breathe 7s ease-in-out infinite;animation-delay:var(--delay,0s)}.dots-project-orbit>.dots-ball strong{font-size:16px}.dots-rail{width:94px;flex-shrink:0;overflow-y:auto;padding:32px 8px;display:flex;flex-direction:column;gap:28px;align-items:center}.dots-rail .dots-project-orbit{width:70px;height:70px;flex-shrink:0;transform-origin:0 0}.dots-rail .dots-ball{padding:8px}.dots-rail .dots-ball strong{font-size:10px;-webkit-line-clamp:2}.dots-rail small{display:none}.dots-map{position:relative;margin:10px auto 40px;animation:dots-veil .4s ease-out}.dots-node{position:absolute;width:120px;height:120px;transform-origin:0 0;z-index:1}.dots-node:hover{z-index:5}.dots-node.root{width:140px;height:140px}.dots-node>.dots-ball{animation:dots-breathe 7s ease-in-out infinite}.dots-node:nth-child(2n)>.dots-ball{animation-delay:-3s}.dots-node.selected>.dots-ball{outline:2px solid #9caedc88;outline-offset:6px}.dots-node.pending>.dots-ball{border-style:dashed}.dots-satellites{position:absolute;left:105px;top:-30px;width:102px;height:180px;visibility:hidden;opacity:0;pointer-events:none;transform:translateX(-8px);transition:.2s}.dots-node:hover .dots-satellites{visibility:visible;opacity:1;pointer-events:auto;transform:translateX(0)}.dots-satellite{position:absolute;width:44px;height:44px;padding:3px;border-radius:50%;border:1px solid #ffffffc9;background:#e3eafaeb;backdrop-filter:blur(15px);box-shadow:0 5px 18px #8194c425;font-size:11px!important}.dots-satellite:hover{transform:scale(1.12);background:#edf4ff}.dots-satellite:nth-child(1){left:0;top:0}.dots-satellite:nth-child(2){left:47px;top:36px}.dots-satellite:nth-child(3){left:55px;top:91px}.dots-satellite:nth-child(4){left:13px;top:136px}.dots-node-note{position:absolute;top:136px;left:-38px;width:196px;text-align:center;font-size:11px;opacity:.7;pointer-events:none}.dots-links{position:absolute;inset:0;overflow:visible;pointer-events:none}.dots-links path{fill:none;stroke:#9caed575;stroke-width:1.5;stroke-dasharray:5 7;animation:dots-flow 24s linear infinite}.dots-links text{font-size:11px;fill:currentColor;opacity:.65;paint-order:stroke;stroke:var(--dsw-alias-background-primary,#f8fafc);stroke-width:4px;stroke-linejoin:round}
+.dots-ball.dsh{background:radial-gradient(circle at 28% 20%,#ffffffb0,transparent 62%),linear-gradient(135deg,#bcecd770,#bde3eb4d)}.dots-ball:hover,.dots-ball:focus-visible{transform:scale(1.08);box-shadow:inset 0 0 24px #ffffff60,0 18px 48px #6d86b92c;border-color:#fff;outline:2px solid #9eafd233;outline-offset:4px}.dots-ball strong{display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:3;overflow:hidden;font-size:14px;font-weight:550;line-height:1.5}.dots-ball small{font-size:10px;opacity:.65;margin-top:7px}.dots-project-orbit>.dots-ball{animation:dots-breathe 7s ease-in-out infinite;animation-delay:var(--delay,0s)}.dots-project-orbit>.dots-ball strong{font-size:16px}.dots-rail{width:94px;flex-shrink:0;overflow-y:auto;padding:32px 8px;display:flex;flex-direction:column;gap:28px;align-items:center}.dots-rail .dots-project-orbit{width:70px;height:70px;flex-shrink:0;transform-origin:0 0}.dots-rail .dots-ball{padding:8px}.dots-rail .dots-ball strong{font-size:10px;-webkit-line-clamp:2}.dots-rail small{display:none}.dots-map{position:relative;margin:10px auto 40px;animation:dots-veil .4s ease-out}.dots-node{position:absolute;width:120px;height:120px;transform-origin:0 0;z-index:1}.dots-loose .dots-node>.dots-ball{overflow:hidden}
+/* 边上的独立对话向画布内侧展开操作，保留删除入口。 */
+.dots-loose .dots-node.actions-left .dots-satellites{left:auto;right:calc(100% - 12px)}
+.dots-loose .dots-node.actions-left .dots-satellite:nth-child(1){left:56px}
+.dots-loose .dots-node.actions-left .dots-satellite:nth-child(2){left:10px}
+.dots-loose .dots-node.actions-left .dots-satellite:nth-child(3){left:2px}
+.dots-loose .dots-node.actions-left .dots-satellites{left:auto;right:calc(100% - 12px)}.dots-loose .dots-node.actions-left .dots-satellite:nth-child(1){left:56px}.dots-loose .dots-node.actions-left .dots-satellite:nth-child(2){left:10px}.dots-loose .dots-node.actions-left .dots-satellite:nth-child(3){left:2px}.dots-node:hover{z-index:5}.dots-node.root{width:140px;height:140px}.dots-node>.dots-ball{animation:dots-breathe 7s ease-in-out infinite}.dots-node:nth-child(2n)>.dots-ball{animation-delay:-3s}.dots-node.selected>.dots-ball{outline:2px solid #9caedc88;outline-offset:6px}.dots-node.pending>.dots-ball{border-style:dashed}.dots-satellites{position:absolute;left:105px;top:-30px;width:102px;height:180px;visibility:hidden;opacity:0;pointer-events:none;transform:translateX(-8px);transition:.2s}.dots-node:hover .dots-satellites{visibility:visible;opacity:1;pointer-events:auto;transform:translateX(0)}.dots-satellite{position:absolute;width:44px;height:44px;padding:3px;border-radius:50%;border:1px solid #ffffffc9;background:#e3eafaeb;backdrop-filter:blur(15px);box-shadow:0 5px 18px #8194c425;font-size:11px!important}.dots-satellite:hover{transform:scale(1.12);background:#edf4ff}.dots-satellite:nth-child(1){left:0;top:0}.dots-satellite:nth-child(2){left:47px;top:36px}.dots-satellite:nth-child(3){left:55px;top:91px}.dots-satellite:nth-child(4){left:13px;top:136px}.dots-node-note{position:absolute;top:136px;left:-38px;width:196px;text-align:center;font-size:11px;opacity:.7;pointer-events:none}.dots-links{position:absolute;inset:0;overflow:visible;pointer-events:none}.dots-links path{fill:none;stroke:#9caed575;stroke-width:1.5;stroke-dasharray:5 7;animation:dots-flow 24s linear infinite}.dots-links text{font-size:11px;fill:currentColor;opacity:.65;paint-order:stroke;stroke:var(--dsw-alias-background-primary,#f8fafc);stroke-width:4px;stroke-linejoin:round}
 .dots-motion-layer{position:absolute;inset:0;overflow:hidden;pointer-events:none;z-index:8}.dots-motion-layer *{pointer-events:none!important}.dots-motion-layer .dots-satellites{display:none}
 /* 移动阶段只合成位移/透明度，暂停重复模糊采样与线条重绘；结束后恢复毛玻璃。 */
 .dots-workspace.dots-animating .dots-ball,.dots-motion-layer .dots-ball{backdrop-filter:none;animation-play-state:paused;box-shadow:inset 0 0 16px #ffffff40,0 8px 24px #667bb21a}
@@ -184,6 +199,7 @@ window.__ModuleLoader__.load({ id: '@local/dsh-codex-dots', factory: require => 
     const [showInternal,setShowInternal] = useState(false), [spaceSize,setSpaceSize] = useState({width:900,height:650});
     const [deletion,setDeletion]=useState(null), [closing,setClosing]=useState(false), [deletionReports,setDeletionReports]=useState([]), [showUnavailable,setShowUnavailable]=useState(false), [serverInfo,setServerInfo]=useState(null);
     const [dismissedNotices,setDismissedNotices]=useState(new Set()), [entryHint,setEntryHint]=useState(0);
+    const [showArchived,setShowArchived]=useState(false);
     // 单击只提示；浏览器 dblclick 识别同一球上的快速双击，避免跨球误进入。
     useEffect(()=>{if(!entryHint)return;const timer=setTimeout(()=>setEntryHint(0),5000);return()=>clearTimeout(timer);},[entryHint]);
     const projectGeometry=useRef(''), treeGeometry=useRef('');
@@ -213,20 +229,20 @@ window.__ModuleLoader__.load({ id: '@local/dsh-codex-dots', factory: require => 
     },[noticeSignature]);
     useEffect(()=>()=>{for(const timer of noticeTimers.current.values())if(timer)clearTimeout(timer);},[]);
     const noticeVisible=key=>!dismissedNotices.has(key);
-    const standalone=project===STANDALONE;
     const canClose=!busy||tab==='history';
     const node = tree?.nodes.find(n => n.key === selected), currentProject = projects.find(p => p.path === project);
+    const standalone=!!currentProject?.standalone;
     const current = ctx.uiSession.adapter.current;
     const session = useSyncExternalStore(fn => current.subscribe(fn), () => current.getSnapshot());
     const owner = session.key || '';
     const act = async fn => { setBusy(true); setError(''); try { await fn(); } catch(e) { setError(e.message); } finally { setBusy(false); } };
-    const discover = async signal => { const data = await api('conversation-projects',{},undefined,signal); const geometry=JSON.stringify(data.projects.map(p=>[p.path,p.count,p.sources]));if(geometry!==projectGeometry.current){captureMotion();projectGeometry.current=geometry;}setProjects(data.projects);setServerInfo({version:data.pluginVersion,capabilities:data.capabilities||[]});setDeletionReports(data.deletions||[]); if(data.errors?.length) setError(data.errors.join('\n')); };
+    const discover = async (signal,refresh=false) => { const data = await api('conversation-projects',refresh?{refresh}: {},undefined,signal); const geometry=JSON.stringify(data.projects.map(p=>[p.path,p.count,p.activeCount,p.recentAt,p.sources]));if(geometry!==projectGeometry.current){captureMotion();projectGeometry.current=geometry;}setProjects(data.projects);setServerInfo({version:data.pluginVersion,capabilities:data.capabilities||[]});setDeletionReports(data.deletions||[]); if(data.errors?.length) setError(data.errors.join('\n')); };
     useEffect(() => { const c=new AbortController();let timer;const poll=async()=>{try{await discover(c.signal);}catch(e){if(!c.signal.aborted)setError(e.message);}if(!c.signal.aborted)timer=setTimeout(poll,10000);};void poll();return()=>{c.abort();clearTimeout(timer);}; },[]);
     // 切换项目或关闭页面时取消旧轮询，避免旧项目结果覆盖当前球群。
     useEffect(() => {
       if(!project)return; const c=new AbortController(); let timer;
       setTree(null);setSelected('');setDrawer(false);setClosing(false);setDeletion(null);setPendingOpen('');setError('');
-      const poll=async()=>{try{const data=await api('conversation-tree',{project,owner},undefined,c.signal);if(!c.signal.aborted){const geometry=JSON.stringify(data.nodes.map(n=>[n.key,n.parentKey,n.mirrorOf,n.hiddenReason,n.internal,n.empty,!!n.unavailable,n.unresolved]));if(geometry!==treeGeometry.current){captureMotion();treeGeometry.current=geometry;}setTree(data);}}catch(e){if(!c.signal.aborted)setError(e.message);}if(!c.signal.aborted)timer=setTimeout(poll,2500);};
+      const poll=async()=>{try{const data=await api('conversation-tree',{project,owner},undefined,c.signal);if(!c.signal.aborted){const geometry=JSON.stringify(data.nodes.map(n=>[n.key,n.parentKey,n.mirrorOf,n.hiddenReason,n.internal,n.empty,!!n.unavailable,n.unresolved,n.archived,n.recentAt]));if(geometry!==treeGeometry.current){captureMotion();treeGeometry.current=geometry;}setTree(data);}}catch(e){if(!c.signal.aborted)setError(e.message);}if(!c.signal.aborted)timer=setTimeout(poll,2500);};
       void poll(); // 先显示磁盘树，索引请求不再挡住第一次渲染。
       if(!standalone)api('conversation-sync',{}, {project,includeArchived:true},c.signal).catch(e=>{if(!c.signal.aborted)setError(e.message);});
       return()=>{c.abort();clearTimeout(timer);};
@@ -257,12 +273,17 @@ window.__ModuleLoader__.load({ id: '@local/dsh-codex-dots', factory: require => 
     const saveLink=()=>act(async()=>setTree(await api('conversation-link',{}, {project,key:selected,parentKey,intent})));
     const summarize=()=>act(async()=>{await api('conversation-link',{}, {project,key:selected,parentKey,intent});setTree(await api('conversation-summary',{}, {project,key:selected,owner}));});
     const submitDots=()=>act(async()=>{const result=await api(node?.source==='codex'?'continue':'conversation-dots',{}, {project,key:selected,owner,threadId:node?.id,goal});setGoal('');setError('');setIntent(result.message);});
-    const visible=useMemo(()=>(tree?.nodes||[]).filter(n=>!n.hiddenReason&&!n.id?.startsWith('selectionchat-temp-')&&(showInternal||!n.internal)&&(showUnavailable||(!n.unavailable&&!n.empty))),[tree?.nodes,showInternal,showUnavailable]);
-    const model=useMemo(()=>layoutTree(visible),[visible]);
+    const visible=useMemo(()=>(tree?.nodes||[]).filter(n=>!n.hiddenReason&&!n.id?.startsWith('selectionchat-temp-')&&(showArchived||!n.archived)&&(showInternal||!n.internal)&&(showUnavailable||(!n.unavailable&&!n.empty))),[tree?.nodes,showInternal,showUnavailable,showArchived]);
+    const model=useMemo(()=>standalone?null:layoutTree(visible),[standalone,visible]);
+    const loose=useMemo(()=>standalone?scatterProjects(visible,spaceSize.width,spaceSize.height,()=>116):null,[standalone,visible,spaceSize.width,spaceSize.height]);
     const structure = visible.map(n => n.key + ':' + (n.parentKey || '') + ':' + !!n.unresolved + ':' + (n.mirrorOf || '')).join('|');
     useLayoutEffect(()=>{
       const el=spaceRef.current;if(!el)return;
       if(!project){el.scrollTop=overviewScroll.current;centeredTree.current=null;return;}
+      if (standalone) {
+        if (centeredTree.current !== project) { el.scrollLeft=0; el.scrollTop=0; centeredTree.current=project; }
+        return;
+      }
       const identity=project+'\n'+structure;
       if(centeredTree.current===identity)return;
       el.style.scrollBehavior='auto';
@@ -270,12 +291,12 @@ window.__ModuleLoader__.load({ id: '@local/dsh-codex-dots', factory: require => 
       if(centeredTree.current?.split('\n')[0]!==project)el.scrollTop=0;
       el.style.scrollBehavior='';
       centeredTree.current=identity;
-    },[project,structure,!!tree]);
+    },[project,structure,!!tree,standalone]);
     // 同一份实时筛选结果供主页和两侧项目使用，不需要点击搜索或发起模型请求。
     const query=filter.trim().toLocaleLowerCase();
-    const matchingProjects=useMemo(()=>projects.filter(p=>!query||p.title.toLocaleLowerCase().includes(query)),[projects,query]);
+    const matchingProjects=useMemo(()=>projects.filter(p=>!query||p.title.toLocaleLowerCase().includes(query)).map(p=>showArchived?p:{...p,count:p.activeCount??p.count}),[projects,query,showArchived]);
     const scattered=useMemo(()=>scatterProjects(matchingProjects,spaceSize.width,spaceSize.height),[matchingProjects,spaceSize.width,spaceSize.height]);
-    const motionSignature=JSON.stringify([project,query,structure,spaceSize.width,spaceSize.height,projects.map(p=>[p.path,p.count,p.sources])]);
+    const motionSignature=JSON.stringify([project,query,structure,showArchived,loose?.projects.map(n=>[n.key,n.recentAt]),spaceSize.width,spaceSize.height,projects.map(p=>[p.path,p.count,p.activeCount,p.recentAt,p.sources])]);
     useLayoutEffect(()=>{
       if(!workspaceRef.current||!motionLayerRef.current)return;
       motionRef.current ||= createOrbitalMotion(workspaceRef.current,motionLayerRef.current);
@@ -287,8 +308,9 @@ window.__ModuleLoader__.load({ id: '@local/dsh-codex-dots', factory: require => 
     // 增量正文覆盖同 ID 落盘消息，暂停后仍刷新完整历史，不把 done 当作正文。
     let display=messages;
     if(node?.source==='codex'&&worker?.liveTurn){const indexed=new Map(messages.map(m=>[m.id,m]));for(const item of worker.liveTurn.items){const old=indexed.get(item.id);if(!old||(item.text||'').length>=(old.text||'').length)indexed.set(item.id,{id:item.id,role:item.type==='agentMessage'?'assistant':item.type==='userMessage'?'user':'tool',text:item.text});}display=[...indexed.values()];}
-    const projectBall=(p,i)=>h('div',{key:p.path,className:'dots-project-orbit','data-motion-key':'project:'+p.path,'data-motion-side':projectSide(p),'data-motion-compact':String(p.x==null),style:{'--delay':(-i*.83)+'s',...(p.x!=null?{position:'absolute',left:p.x-p.size/2,top:p.y-p.size/2,width:p.size,height:p.size}: {})}},h('button',{className:'dots-ball '+(projectSide(p)),title:p.standalone?'Codex 和 DSH 中未归入项目的对话':p.path,onClick:()=>chooseProject(p.path)},h('strong',null,p.title),h('small',null,(projectSide(p)==='codex'?'CODEX':'DEEPSEEK')+' · '+(p.count||0))));
-    const others=matchingProjects.filter(p=>p.path!==project);
+    const projectBall=(p,i)=>h('div',{key:p.path,className:'dots-project-orbit','data-motion-key':'project:'+p.path,'data-motion-side':projectSide(p),'data-motion-compact':String(p.x==null),style:{'--delay':(-i*.83)+'s',...(p.x!=null?{position:'absolute',left:p.x-p.size/2,top:p.y-p.size/2,width:p.size,height:p.size}: {})}},h('button',{className:'dots-ball '+(projectSide(p)),title:p.standalone?p.title:p.path,onClick:()=>chooseProject(p.path)},h('strong',null,p.title),h('small',null,(projectSide(p)==='codex'?'CODEX':'DEEPSEEK')+' · '+(p.count||0))));
+    const conversationBall=n=>h('div',{key:n.key,className:'dots-node'+(selected===n.key?' selected':'')+(n.depth==null&&!standalone?' pending':'')+(standalone&&n.x+(n.size||120)/2+105>spaceSize.width?' actions-left':''),'data-motion-key':'conversation:'+project+':'+n.key,'data-motion-side':n.source,style:{left:n.x-(n.size||120)/2,top:n.y-(n.size||120)/2,width:n.size,height:n.size}},h('button',{className:'dots-ball '+n.source,title:n.title,onClick:()=>setEntryHint(v=>v+1),onDoubleClick:()=>{setEntryHint(0);enter(n);},'aria-label':`进入 ${n.title}`,'aria-description':'快速双击进入对话'},h('strong',null,n.title),h('small',null,(n.source==='codex'?'Codex':'DSH')+' · '+(standalone?'独立对话':n.depth==null?'待确认':`深度 ${n.depth}`))),h('div',{className:'dots-satellites'},...(standalone?[['历史','history'],['Dots','dots'],['删除','delete']]:[['分支','branch'],['历史','history'],['Dots','dots'],['删除','delete']]).map(([label,mode])=>h('button',{key:mode,className:'dots-satellite'+(mode==='delete'?' danger':''),title:label,disabled:busy,onClick:()=>mode==='delete'?askDelete(n):pick(n,mode)},label))),h('div',{className:'dots-node-note'},n.unavailable?'历史不可用':n.empty?'空白会话':n.internal?'后台子代理':n.archived?'已归档':n.unresolved?'来源待确认':n.relationSource==='codex-fork'?'原生 fork 分支':n.relationSource==='content'?'历史＋时间推断':n.dshSessionId?'已复制到 DSH':''));
+    const others=matchingProjects.filter(p=>p.path!==project).sort((a,b)=>(b.recentAt||0)-(a.recentAt||0));
     const button=(text,onClick,disabled=false)=>h('button',{className:'dots-chip',onClick,disabled},text);
     const field=(label,value,set,multiline=false)=>h('label',null,label,h(multiline?'textarea':'input',{value,onChange:e=>set(e.target.value)}));
     const form=h('div',{className:'dots-form'},
@@ -310,13 +332,13 @@ window.__ModuleLoader__.load({ id: '@local/dsh-codex-dots', factory: require => 
     return h('section',{className:'dots-orbit','aria-label':'项目对话星图'},
       h('header',{className:'dots-bar'},
         h('input',{className:'dots-search',type:'search',placeholder:'搜索项目…','aria-label':'搜索项目',value:filter,onChange:e=>{const value=e.target.value;captureMotion();overviewScroll.current=0;if(spaceRef.current)spaceRef.current.scrollTop=0;setFilter(value);if(value.trim()&&project){chooseProject('');setPendingOpen('');}}}),
-        h('nav',{className:'dots-actions','aria-label':'页面操作'},project&&button('全部项目',()=>chooseProject('')),project&&button('居中',()=>{const el=spaceRef.current;if(el){el.scrollLeft=treeScrollLeft(model,el.clientWidth);el.scrollTop=0;}}),button('刷新',project?refresh:()=>act(()=>discover()),busy),h('button',{className:'dots-chip dots-back',onClick:goBack,disabled:!canClose},'← 返回'))),
-      h('div',{className:'dots-legend'},h('span',null,h('i',{className:'dots-dot'}),'Codex 项目'),h('span',null,h('i',{className:'dots-dot dsh'}),'DSH 项目'),project&&h('label',null,h('input',{type:'checkbox',checked:showInternal,onChange:e=>setShowInternal(e.target.checked)}),' 显示后台子代理'),project&&h('label',null,h('input',{type:'checkbox',checked:showUnavailable,onChange:e=>setShowUnavailable(e.target.checked)}),' 显示空白/异常'),h('span',{className:'dots-spacer'}),project?`${currentProject?.title||project} · ${tree?model.nodes.length:'…'} 个对话`:null),
+        h('nav',{className:'dots-actions','aria-label':'页面操作'},project&&button('全部项目',()=>chooseProject('')),project&&button('居中',()=>{const el=spaceRef.current;if(el){el.scrollLeft=model?treeScrollLeft(model,el.clientWidth):0;el.scrollTop=0;}}),button('刷新',project?refresh:()=>act(()=>discover(undefined,true)),busy),h('button',{className:'dots-chip dots-back',onClick:goBack,disabled:!canClose},'← 返回'))),
+      h('div',{className:'dots-legend'},h('span',null,h('i',{className:'dots-dot'}),'Codex 项目'),h('span',null,h('i',{className:'dots-dot dsh'}),'DSH 项目'),h('label',null,h('input',{type:'checkbox',checked:showArchived,onChange:e=>{captureMotion();setShowArchived(e.target.checked);}}),' 显示已归档对话'),project&&h('label',null,h('input',{type:'checkbox',checked:showInternal,onChange:e=>setShowInternal(e.target.checked)}),' 显示后台子代理'),project&&h('label',null,h('input',{type:'checkbox',checked:showUnavailable,onChange:e=>setShowUnavailable(e.target.checked)}),' 显示空白/异常'),h('span',{className:'dots-spacer'}),project?`${currentProject?.title||project} · ${tree?(loose?.projects.length??model.nodes.length):'…'} 个对话`:null),
       h('div',{className:'dots-workspace',key:'workspace',ref:workspaceRef,'data-modal-open':drawer?'true':undefined},h('div',{className:'dots-motion-layer',key:'motion-layer',ref:motionLayerRef,'aria-hidden':true}),notices,project&&h('nav',{className:'dots-rail','aria-label':'Codex 项目 左'},...others.filter(p=>projectSide(p)==='codex').map(projectBall)),
-        h('div',{className:'dots-space',key:'canvas',ref:spaceRef},!project?h('div',{className:'dots-galaxy',style:{height:scattered.height}},...scattered.projects.map(projectBall),(!projects.length||!matchingProjects.length)&&h('p',{className:'dots-empty'},query?'没有匹配的项目':'正在发现项目…')):h('div',{className:'dots-map',style:{width:model.width,height:model.height}},
+        h('div',{className:'dots-space',key:'canvas',ref:spaceRef},!project?h('div',{className:'dots-galaxy',style:{height:scattered.height}},...scattered.projects.map(projectBall),(!projects.length||!matchingProjects.length)&&h('p',{className:'dots-empty'},query?'没有匹配的项目':'正在发现项目…')):standalone?h('div',{className:'dots-galaxy dots-loose',style:{height:loose.height}},...loose.projects.map(conversationBall),!loose.projects.length&&h('p',{className:'dots-empty'},tree?'暂无独立对话。':'正在读取独立对话…')):h('div',{className:'dots-map',style:{width:model.width,height:model.height}},
           h('svg',{className:'dots-links',width:model.width,height:model.height,'aria-hidden':true},...model.edges.map((edge,i)=>h('g',{key:i},h('path',{d:`M ${edge.from.x} ${edge.from.y+60} C ${edge.from.x} ${edge.from.y+135}, ${edge.to.x} ${edge.to.y-135}, ${edge.to.x} ${edge.to.y-60}`}),edge.to.reason&&h('text',{x:(edge.from.x+edge.to.x)/2,y:(edge.from.y+edge.to.y)/2+12,textAnchor:'middle'},edge.to.reason)))),
           h('div',{className:'dots-node root','data-motion-key':'project:'+project,'data-motion-side':currentProject?projectSide(currentProject):'dsh',style:{left:model.root.x-70,top:model.root.y-70}},h('button',{className:'dots-ball '+(currentProject?.sources.includes('codex')?'codex':'dsh'),title:standalone?'未归入项目的对话':project,onClick:standalone?undefined:()=>rootAction('new')},h('strong',null,currentProject?.title||'项目'),h('small',null,standalone?'未归入项目':'项目根 · 点击新建')), !standalone&&h('div',{className:'dots-satellites'},h('button',{className:'dots-satellite',onClick:()=>rootAction('new')},'新建'),h('button',{className:'dots-satellite',title:'复制项目到 DSH',onClick:()=>rootAction('copy')},'复制'),h('button',{className:'dots-satellite danger',title:'删除项目及对话历史',disabled:busy,onClick:()=>askDelete(null)},'删除'))),
-          ...model.nodes.map(n=>h('div',{key:n.key,className:'dots-node'+(selected===n.key?' selected':'')+(n.depth==null?' pending':''),'data-motion-key':'conversation:'+project+':'+n.key,'data-motion-side':n.source,style:{left:n.x-60,top:n.y-60}},h('button',{className:'dots-ball '+n.source,title:n.title,onClick:()=>setEntryHint(v=>v+1),onDoubleClick:()=>{setEntryHint(0);enter(n);},'aria-label':`进入 ${n.title}`,'aria-description':'快速双击进入对话'},h('strong',null,n.title),h('small',null,(n.source==='codex'?'Codex':'DSH')+' · '+(standalone?'独立对话':n.depth==null?'待确认':`深度 ${n.depth}`))),h('div',{className:'dots-satellites'},...(standalone?[['历史','history'],['Dots','dots']]:[['分支','branch'],['历史','history'],['Dots','dots'],['删除','delete']]).map(([label,mode])=>h('button',{key:mode,className:'dots-satellite'+(mode==='delete'?' danger':''),title:label,disabled:busy,onClick:()=>mode==='delete'?askDelete(n):pick(n,mode)},label))),h('div',{className:'dots-node-note'},n.unavailable?'历史不可用':n.empty?'空白会话':n.internal?'后台子代理':n.unresolved?'来源待确认':n.relationSource==='codex-fork'?'原生 fork 分支':n.relationSource==='content'?'历史＋时间推断':n.archived?'已归档':n.dshSessionId?'已复制到 DSH':''))),
+          ...model.nodes.map(conversationBall),
           !model.nodes.length&&h('div',{className:'dots-empty',style:{paddingTop:200}},!tree||tree.loading?.running?'正在更新对话目录，可先浏览已加载节点…':standalone?'暂无独立对话。':'此项目暂无普通对话，点击根球新建。'))),
         project&&h('nav',{className:'dots-rail','aria-label':'DSH 项目 右'},...others.filter(p=>projectSide(p)==='dsh').map(projectBall)),
         drawer&&project&&h('div',{className:'dots-modal-layer'+(closing?' closing':''),onClick:e=>{if(e.target===e.currentTarget&&canClose)closeDialog();}},h('aside',{className:'dots-drawer',role:'dialog','aria-modal':true,'aria-label':'对话操作与 Dots',tabIndex:-1,ref:dialogRef,onKeyDown:e=>{if(e.key==='Escape'&&canClose)closeDialog();if(e.key==='Tab'){const items=[...e.currentTarget.querySelectorAll('button:not(:disabled),input,textarea,select,[tabindex="0"]')];const first=items[0],last=items.at(-1);if(e.shiftKey&&(document.activeElement===first||document.activeElement===e.currentTarget)){e.preventDefault();last?.focus();}else if(!e.shiftKey&&document.activeElement===last){e.preventDefault();first?.focus();}}}},h('div',{className:'dots-drawer-head'},button('← 返回项目',closeDialog,!canClose),h('strong',null,deletion?.title||node?.title||currentProject?.title),h('button',{className:'dots-close','aria-label':'关闭对话操作',onClick:closeDialog,disabled:!canClose},'×')),node&&tab!=='delete'&&h('div',{className:'dots-tabs'},...(standalone?[['history','历史'],['dots','Dots']]:[['history','历史'],['dots','Dots'],['branch','分支'],['relation','关系']]).map(([mode,label])=>h('button',{className:'dots-chip'+(tab===mode?' active':''),key:mode,onClick:()=>setTab(mode)},label))),

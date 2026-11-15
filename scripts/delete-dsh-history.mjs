@@ -13,7 +13,7 @@ export async function eraseDshHistory(job) {
       const relative = path.relative(root, dir), parts = relative.split(path.sep);
       if (path.isAbsolute(relative) || parts.length !== 2 || parts.includes('..') || path.basename(dir) !== target.id || /[\\/]/.test(target.id)) throw Error('拒绝删除会话存储之外的路径');
       await fs.rm(dir, { recursive: true, force: true });
-      await fs.rm(path.join(job.project, '.dsh-codex-dots', 'history', target.id + '.json'), { force: true });
+      if (job.project) await fs.rm(path.join(job.project, '.dsh-codex-dots', 'history', target.id + '.json'), { force: true });
       removed.push(target.id);
     } catch (e) { errors.push(target.id + '：' + e.message); }
   }

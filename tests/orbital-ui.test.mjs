@@ -213,7 +213,7 @@ test('默认不渲染后台子代理、临时与已消失节点，开关只恢�
   const page = fixture([[{ path:'/p',title:'项目',sources:['dsh'] }],'/p',tree]);
   let elements=flatten(page.render());
   assert.equal(elements.filter(n=>n.props['aria-label']?.startsWith('进入 ')).length,1);
-  elements.find(n=>n.type==='input'&&n.props.type==='checkbox').props.onChange({target:{checked:true}});
+  flatten(elements.find(n=>n.type==='label'&&n.children.includes(' 显示后台子代理'))).find(n=>n.type==='input').props.onChange({target:{checked:true}});
   elements=flatten(page.render());
   assert.equal(elements.filter(n=>n.props['aria-label']?.startsWith('进入 ')).length,2);
 });
@@ -271,4 +271,30 @@ test('项目球、树操作与整项目复制前置条件可渲染，全文 Mark
   tree.lastCopyAt = 1; tree.nodes[0].dshSessionId = 'native-session';
   flatten(page.render()).find(n => n.props['aria-label'] === '进入 演示对话').props.onDoubleClick();
   assert.deepEqual(page.opened, ['native-session']);
+});
+
+
+test('独立对话散布、最近使用居中，默认隐藏归档和异常，逐条提供删除', () => {
+  const group='standalone-conversations:dsh';
+  const nodes=[
+    {key:'dsh:old',id:'old',source:'dsh',title:'旧对话',recentAt:1},
+    {key:'dsh:recent',id:'recent',source:'dsh',title:'最近对话',recentAt:9},
+    {key:'dsh:archived',id:'archived',source:'dsh',title:'归档对话',archived:true},
+    {key:'dsh:empty',id:'empty',source:'dsh',title:'草稿',empty:true},
+    {key:'dsh:broken',id:'broken',source:'dsh',title:'损坏日志',unavailable:'corrupt'},
+  ];
+  const page=fixture([[{path:group,title:'DSH 独立对话',sources:['dsh'],standalone:true}],group,{nodes}]);
+  let elements=flatten(page.render());
+  assert.ok(elements.some(n=>n.props.className==='dots-galaxy dots-loose'));
+  assert.ok(!elements.some(n=>n.type==='svg'));
+  assert.equal(elements.filter(n=>n.props.title==='删除').length,2);
+  const ball=elements.find(n=>n.props['data-motion-key']?.endsWith('dsh:recent'));
+  assert.equal(ball.props.style.left+ball.props.style.width/2,450);
+  assert.equal(ball.props.style.top+ball.props.style.height/2,325);
+  const checkbox=flatten(elements.find(n=>n.type==='label'&&n.children.includes(' 显示已归档对话'))).find(n=>n.type==='input');
+  assert.equal(checkbox.props.checked,false);
+  checkbox.props.onChange({target:{checked:true}});
+  elements=flatten(page.render());
+  assert.equal(elements.filter(n=>n.props.title==='删除').length,3);
+  assert.ok(elements.some(n=>n.props['aria-label']==='进入 归档对话'));
 });

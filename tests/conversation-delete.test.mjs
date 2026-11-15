@@ -113,3 +113,26 @@ test('清理任务在写入进程退出前不删除，退出后完成并落盘�
     await fs.access(f.files.get('child')); await fs.access(path.join(f.project, 'code.py'));
   } finally { writer.kill(); await task?.catch(()=>{}); await f.close(); }
 });
+
+
+test('独立对话只能逐条双重确认，DSH 清理不需要项目目录', async () => {
+  const f = await fixture();
+  try {
+    let nodes = [{ key: 'dsh:child', id: 'child', source: 'dsh', title: '独立 DSH' }];
+    f.service.treeState = async () => ({ nodes });
+    f.service.removeStandalone = async keys => { nodes = nodes.filter(n => !keys.includes(n.key)); };
+    const project = 'standalone-conversations:dsh';
+    await assert.rejects(f.deletion.prepare({ project }), /先选择/);
+    const plan = await f.deletion.prepare({ project, key: 'dsh:child' });
+    await assert.rejects(f.deletion.confirm({ token: plan.token, step: 2 }), /第一次/);
+    await f.deletion.confirm({ token: plan.token, step: 1 });
+    assert.deepEqual(f.calls, []);
+    const result = await f.deletion.confirm({ token: plan.token, step: 2 });
+    assert.deepEqual(result.removed, ['dsh:child']);
+    assert.deepEqual(nodes, []);
+    const targets = f.calls.find(row => row[0] === 'queue')[1];
+    assert.deepEqual((await eraseDshHistory({ root: f.root, targets })).removed, ['child']);
+    await fs.access(f.files.get('copy'));
+    await fs.access(path.join(f.project, 'code.py'));
+  } finally { await f.close(); }
+});

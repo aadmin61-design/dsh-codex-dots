@@ -14,20 +14,28 @@ async function main() {
   const { assertV4RowAdmission } = await import('@deepseek-ai/dsh-session-format-v3-to-v4');
   const { DshConversations } = await import(pathToFileURL(path.resolve(__dirname, '../lib/dsh-conversations.mjs')));
   const { ConversationTree } = await import(pathToFileURL(path.resolve(__dirname, '../lib/conversation-tree.mjs')));
-  const project = await fs.mkdtemp(path.resolve(__dirname, '../.runtime/tree-smoke-'));
+  const fixtureRoot = await fs.mkdtemp(path.resolve(__dirname, '../.runtime/tree-smoke-'));
+  const project = path.join(fixtureRoot, 'registered');
+  const restoredProject = path.join(fixtureRoot, 'restored');
+  const scratch = path.join(fixtureRoot, 'Codex', '2026-11-15', 'chat');
+  await fs.mkdir(project);
+  await fs.mkdir(restoredProject);
+  await fs.mkdir(scratch, { recursive: true });
   const records = new Map(), attached = [], calls = [];
-  const workspace = { get sessionIds() { return [...records.keys()].filter(id => id !== 'independent-dsh'); }, id: 'fixture-project', path: project, title: '隔离测试', attachSession: async id => { attached.push(id); } };
+  const workspace = { get sessionIds() { return [...records.keys()].filter(id => !['independent-dsh', 'default-dsh', 'ghost-draft', 'ghost-broken'].includes(id)); }, id: 'fixture-project', path: project, title: '隔离测试', attachSession: async id => { attached.push(id); } };
   const ctx = {
-    workspaceRegistry: { list: () => [workspace], create: async () => workspace, archivedSessionIds: [] },
+    workspaceRegistry: {
+      list: () => [workspace, { id: 'default', title: '已重命名', path: scratch, sessionIds: ['default-dsh'] }],
+      requireState: () => ({ defaultWorkspaceId: 'default' }), create: async () => workspace, archivedSessionIds: [] },
     agents: { get: () => undefined }, get: () => undefined, logger: { warn() {} },
     sessionQuery: {
       listSessions: async () => [...records.values()].map(r => ({ header: r.session })),
-      readTitleSnapshots: async ids => ids.map(id => ({ status: 'fulfilled', value: { session: records.get(id).session, title: { title: '已有DSH对话' } } })),
+      readTitleSnapshots: async ids => ids.map(id => ({ status: 'fulfilled', value: { session: records.get(id).session, title: id.startsWith('ghost-') ? undefined : { title: '已有DSH对话' } } })),
       readSession: async id => records.get(id),
     },
     sessionPersistence: {
       stat: async id => records.has(id) ? { header: records.get(id).session, revision: String(records.get(id).events.length) } : undefined,
-      open: async id => ({ read: async (offset, length) => ({ events: records.get(id).events.slice(offset, offset + length) }), close: async () => {} }),
+      open: async id => ({ read: async (offset, length) => { if (id === 'ghost-broken') throw Error('stored log is corrupt'); return { events: records.get(id).events.slice(offset, offset + length) }; }, close: async () => {} }),
       create: async header => {
       const record = { session: header, events: [] }; records.set(header.id, record);
       return { append: async events => { for (const event of events) assertV4RowAdmission(event); record.events.push(...events); }, flush: async () => {}, close: async () => {} };
@@ -53,19 +61,46 @@ async function main() {
   const listThreads = codex.listThreads;
   codex.listThreads = async options => {
     const page = await listThreads(options);
-    if (!options.archived) page.data.push({ id: 'independent-codex', cwd: project, projectId: null, title: '独立 Codex' });
+    if (!options.archived) page.data.push(
+      { id: 'independent-codex', cwd: project, projectId: null, title: '独立 Codex' },
+      { id: 'native-moved', cwd: path.join(project, '以前的目录'), projectId: 'native-id', title: '原生移动', forkedFromId: 'cx-source' },
+      { id: 'desktop-moved', cwd: path.join(project, '以前的目录'), projectId: null, title: '桌面归属', forkedFromId: 'cx-source' },
+      { id: 'secondary-root', cwd: path.toNamespacedPath(path.join(project, '另外的根', '子目录')), projectId: null, title: '旧版目录匹配', forkedFromId: 'cx-source' },
+      { id: 'unassigned', cwd: path.join(fixtureRoot, '无项目目录'), projectId: null, title: '无项目' },
+      { id: 'recovered-codex', cwd: path.toNamespacedPath(restoredProject), title: '恢复的项目对话' },
+      { id: 'scratch-codex', cwd: path.toNamespacedPath(scratch), title: '日期临时目录' },
+    );
     return page;
   };
   records.set('independent-dsh', { session: { id: 'independent-dsh', cwd: project, createdAt: Date.now() }, events: [] });
-  const service = new DshConversations(ctx, async () => codex);
+  records.set('default-dsh', { session: { id: 'default-dsh', cwd: scratch, createdAt: Date.now() }, events: [] });
+  for (const id of ['ghost-draft', 'ghost-broken']) records.set(id, { session: { id, cwd: scratch, createdAt: Date.now() }, events: [] });
+  const readCodexState = async () => ({
+    'local-projects': {
+      legacy: { name: '测试项目', rootPaths: [project, path.join(project, '另外的根')] },
+      prefix: { name: '前缀测试', rootPaths: [path.join(project, 'prefix-project')] },
+    },
+    'app-server-project-id-by-legacy-project-id-by-host': { local: { legacy: 'native-id' } },
+    'thread-project-assignments': { 'desktop-moved': { projectKind: 'local', projectId: 'legacy' } },
+    'projectless-thread-ids': ['independent-codex', 'native-moved'],
+  });
+  const service = new DshConversations(ctx, async () => codex, { readCodexState });
   try {
     // 同目录的独立会话仍归入独立分组，刷新后不会在项目树重复显示。
     const directory = await service.projects();
-    assert.equal(directory.projects.find(p => p.standalone).count, 2);
-    const standalone = await service.treeState('standalone-conversations');
-    assert.deepEqual(new Set(standalone.nodes.map(n => n.id)), new Set(['independent-dsh', 'independent-codex']));
+    assert.deepEqual(directory.projects.filter(p => p.standalone).map(p => [p.title, p.count]), [['Codex 独立对话', 3], ['DSH 独立对话', 2]]);
+    const codexGroup = await service.treeState('standalone-conversations:codex');
+    assert.deepEqual(new Set(codexGroup.nodes.map(n => n.id)), new Set(['independent-codex', 'unassigned', 'scratch-codex']));
+    const dshGroup = await service.treeState('standalone-conversations:dsh');
+    assert.deepEqual(new Set(dshGroup.nodes.filter(n => !n.empty && !n.unavailable).map(n => n.id)), new Set(['independent-dsh', 'default-dsh']));
+    assert.equal(dshGroup.nodes.find(n => n.id === 'ghost-draft').empty, true);
+    assert.match(dshGroup.nodes.find(n => n.id === 'ghost-broken').unavailable, /corrupt/);
+    assert.ok(!directory.projects.some(p => p.path === scratch));
+    assert.equal(directory.projects.find(p => p.path === restoredProject).count, 1);
+    assert.deepEqual((await service.sync(restoredProject, true)).nodes.map(n => n.id), ['recovered-codex']);
     const indexed = await service.sync(project, true);
-    assert.deepEqual(indexed.nodes.map(n => n.id), ['cx-source']);
+    assert.deepEqual(new Set(indexed.nodes.map(n => n.id)), new Set(['cx-source', 'native-moved', 'desktop-moved', 'secondary-root']));
+    assert.ok(!directory.projects.some(p => p.path === path.join(project, '另外的根')));
 
     // 用户关闭窗口后，正在返回的 Codex 分页不会发起下一次读取。
     const abort = new AbortController();
@@ -77,6 +112,9 @@ async function main() {
     };
     await assert.rejects(service.history({ source: 'codex', id: 'independent-codex' }, abort.signal), { name: 'AbortError' });
     codex.readThread = firstPage;
+    codex.listThreads = listThreads;
+    service.codexDirectories.clear();
+    await service.sync(project, true);
     const result = await service.create(project, { parentKey: 'codex:cx-source', title: '迁移', intent: '转入DSH继续' });
     const record = records.get(result.sessionId);
     assert.equal(record.session.version, SESSION_FORMAT_VERSION);
@@ -149,6 +187,7 @@ async function main() {
     assert.ok(emptyReads>readCount);
     // 前台请求无需等待目录或正文加载完成。
     const originalList=codex.listThreads;let release;
+    service.codexDirectories.clear();
     codex.listThreads=async options=>{await new Promise(resolve=>{release=resolve;});return originalList(options);};
     const cached=await service.requestSync(project,false);
     assert.ok(cached.nodes.length>0);assert.equal(cached.loading.running,true);
@@ -160,9 +199,9 @@ async function main() {
     const prefixClient={listThreads:async({archived})=>({data:archived?[]:['a','b'].map((id,i)=>({id,cwd:cachedProject,title:id,createdAt:i+1,updatedAt:10})),nextCursor:null}),
       readThread:async()=>{throw Error('索引不能读取完整历史');},
       readTurns:async(id,options)=>{assert.equal(options.direction,'asc');pages++;return {turns:[{items:[{id:'u',type:'userMessage',text:'共同问题'.repeat(30)},{id:'a',type:'agentMessage',text:'共同回答'.repeat(30)},{id,type:'userMessage',text:id}]}],nextCursor:'不应读取的尾页'};}};
-    const first=new DshConversations(ctx,async()=>prefixClient);
+    const first=new DshConversations(ctx,async()=>prefixClient,{ readCodexState });
     await first.sync(cachedProject,true);assert.equal(pages,2);await first.close();
-    const second=new DshConversations(ctx,async()=>prefixClient);
+    const second=new DshConversations(ctx,async()=>prefixClient,{ readCodexState });
     await second.sync(cachedProject,true);assert.equal(pages,2);
     assert.equal(second.jobs.get(path.resolve(cachedProject)).progress.reused,1);
     ctx.agents.list=()=>[{status:'running'}];second.queue=[cachedProject];
@@ -174,7 +213,7 @@ async function main() {
     const child=nativeFork.nodes.find(n=>n.id==='b');
     assert.equal(child.relationSource,'codex-fork');assert.equal(child.parentKey,'codex:a');assert.equal(child.forkedFromOrdinalExclusive,6794);
     await second.close();
-    console.log(JSON.stringify({ ok: true, checks: ['真实 DSH Session/v4 历史准入', '完整分页与8000字正文', '迁移保留源与原始快照', '原生DSH分支参数', '深度1/2/3', 'DeepSeek摘要关闭思考、增量正文与截断/空正文处理', '完整项目注册与副本同深度', '复制单任务及重复同步无重复', '复制完成轮询状态', '临时会话过滤与损坏隔离', '空白隐藏、缓存复用与新消息恢复', '目录请求即时返回缓存', '重启后前缀结果复用', '忙时暂停后台预载'] }));
-  } finally { await service.close(); hook.deregister(); await fs.rm(project, { recursive: true, force: true }); }
+    console.log(JSON.stringify({ ok: true, checks: ['原生归属优先、Windows 目录恢复、默认工作区与双平台独立分组', '真实 DSH Session/v4 历史准入', '完整分页与8000字正文', '迁移保留源与原始快照', '原生DSH分支参数', '深度1/2/3', 'DeepSeek摘要关闭思考、增量正文与截断/空正文处理', '完整项目注册与副本同深度', '复制单任务及重复同步无重复', '复制完成轮询状态', '临时会话过滤与损坏隔离', '空白隐藏、缓存复用与新消息恢复', '目录请求即时返回缓存', '重启后前缀结果复用', '忙时暂停后台预载'] }));
+  } finally { await service.close(); hook.deregister(); await fs.rm(fixtureRoot, { recursive: true, force: true }); }
 }
 main().catch(error => { console.error(error); process.exitCode = 1; });
