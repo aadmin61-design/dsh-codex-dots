@@ -1,6 +1,6 @@
 {
   "name": "@local/dsh-codex-dots",
-  "version": "2.6.10",
+  "version": "2.6.11",
   "private": true,
   "type": "module",
   "description": "DeepSeek 主导的 Codex / DSH 后台任务编排、额度暂停和阶段回报",

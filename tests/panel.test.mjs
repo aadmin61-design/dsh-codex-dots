@@ -12,7 +12,7 @@ test('目录握手报告删除能力，删除路由已注册且拒绝未确认�
   try{
     const prefix='http://dsh.internal/api/codex-dots/';
     const response=await routes.get('/api/codex-dots/conversation-projects').fetch(new Request(prefix+'conversation-projects'));
-    const data=await response.json();assert.equal(data.pluginVersion,'2.6.10');assert.ok(data.capabilities.includes('permanent-delete-v1'));
+    const data=await response.json();assert.equal(data.pluginVersion,'2.6.11');assert.ok(data.capabilities.includes('permanent-delete-v1'));
     assert.ok(routes.has('/api/codex-dots/conversation-delete-plan'));
     const denied=await routes.get('/api/codex-dots/conversation-delete-confirm').fetch(new Request(prefix+'conversation-delete-confirm',{method:'POST',body:JSON.stringify({token:'invalid',step:2})}));
     assert.equal(denied.status,400);assert.match((await denied.json()).error,/确认已失效/);

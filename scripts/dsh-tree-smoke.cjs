@@ -16,7 +16,7 @@ async function main() {
   const { ConversationTree } = await import(pathToFileURL(path.resolve(__dirname, '../lib/conversation-tree.mjs')));
   const project = await fs.mkdtemp(path.resolve(__dirname, '../.runtime/tree-smoke-'));
   const records = new Map(), attached = [], calls = [];
-  const workspace = { id: 'fixture-project', path: project, title: '隔离测试', attachSession: async id => { attached.push(id); } };
+  const workspace = { get sessionIds() { return [...records.keys()].filter(id => id !== 'independent-dsh'); }, id: 'fixture-project', path: project, title: '隔离测试', attachSession: async id => { attached.push(id); } };
   const ctx = {
     workspaceRegistry: { list: () => [workspace], create: async () => workspace, archivedSessionIds: [] },
     agents: { get: () => undefined }, get: () => undefined, logger: { warn() {} },
@@ -50,9 +50,33 @@ async function main() {
     readThread: async (_id, { cursor }) => ({ id: 'cx-source', cwd: project, title: '来源', model: 'fixture', nextCursor: cursor ? null : 'older', turns: cursor ? [{ id: 'old', status: 'completed', items: [{ type: 'userMessage', text: '原问题' }, { type: 'agentMessage', text: full }, { type: 'commandExecution', text: '历史输出' }] }] : [{ id: 'new', status: 'completed', items: [{ type: 'userMessage', text: '后续问题' }, { type: 'agentMessage', text: '后续回答' }] }] }),
   };
   codex.readTurns = async (id, options) => codex.readThread(id, options);
+  const listThreads = codex.listThreads;
+  codex.listThreads = async options => {
+    const page = await listThreads(options);
+    if (!options.archived) page.data.push({ id: 'independent-codex', cwd: project, projectId: null, title: '独立 Codex' });
+    return page;
+  };
+  records.set('independent-dsh', { session: { id: 'independent-dsh', cwd: project, createdAt: Date.now() }, events: [] });
   const service = new DshConversations(ctx, async () => codex);
   try {
-    await service.sync(project, true);
+    // 同目录的独立会话仍归入独立分组，刷新后不会在项目树重复显示。
+    const directory = await service.projects();
+    assert.equal(directory.projects.find(p => p.standalone).count, 2);
+    const standalone = await service.treeState('standalone-conversations');
+    assert.deepEqual(new Set(standalone.nodes.map(n => n.id)), new Set(['independent-dsh', 'independent-codex']));
+    const indexed = await service.sync(project, true);
+    assert.deepEqual(indexed.nodes.map(n => n.id), ['cx-source']);
+
+    // 用户关闭窗口后，正在返回的 Codex 分页不会发起下一次读取。
+    const abort = new AbortController();
+    const firstPage = codex.readThread;
+    codex.readThread = async (...args) => {
+      const page = await firstPage(...args);
+      abort.abort();
+      return page;
+    };
+    await assert.rejects(service.history({ source: 'codex', id: 'independent-codex' }, abort.signal), { name: 'AbortError' });
+    codex.readThread = firstPage;
     const result = await service.create(project, { parentKey: 'codex:cx-source', title: '迁移', intent: '转入DSH继续' });
     const record = records.get(result.sessionId);
     assert.equal(record.session.version, SESSION_FORMAT_VERSION);
